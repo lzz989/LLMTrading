@@ -1453,7 +1453,8 @@ def cmd_clean_outputs(args: argparse.Namespace) -> int:
     entries: list[tuple[float, Path]] = []
     for p in root.iterdir():
         name = p.name
-        if name in {".gitkeep"}:
+        if name in {".gitkeep", "_ssh"}:
+            # 这里可能存着用于 git push 的 SSH key（别删，删了你就等着抓狂吧）
             continue
         if p.is_file() and (not include_logs):
             # 默认只清“结果目录”，日志别乱动
