@@ -1,0 +1,12 @@
+.venv/
+.venv312/
+.matplotlib/
+.pip_cache/
+.python_packages/
+outputs/
+data/
+references/
+__pycache__/
+*.pyc
+.DS_Store
+.env

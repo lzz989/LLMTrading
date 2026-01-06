@@ -1,0 +1,7 @@
+pandas>=1.5,<2.1
+matplotlib>=3.5,<3.8
+
+# 注意：Python 3.8 时代为了绕开 aiohttp>=3.11（要求 Python>=3.9），这里固定过一个旧版源码。
+# 现在项目基线已切到 Python 3.12，这份文件只留档，不建议再用。
+akshare @ git+https://github.com/Heroeshigh/akshare.git@release-v1.4.92
+

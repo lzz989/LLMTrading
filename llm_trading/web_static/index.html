@@ -1,0 +1,410 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>LLM辅助交易 - Web</title>
+    <link rel="stylesheet" href="/static/styles.css?v=20260104_9" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo">LLM</div>
+        <div class="title">
+          <div class="name">LLM辅助交易</div>
+          <div class="sub">多流派对比 · 周线波段 · 研究工具</div>
+        </div>
+      </div>
+      <div class="status">
+        <span class="dot" id="healthDot"></span>
+        <span id="healthText">连接中…</span>
+      </div>
+    </header>
+
+    <main class="container">
+      <nav class="tabs">
+        <button class="tab active" data-tab="analyze">一键分析</button>
+        <button class="tab" data-tab="scan">ETF 扫描</button>
+        <button class="tab" data-tab="scan-stock">全A 扫描</button>
+        <button class="tab" data-tab="about">说明</button>
+      </nav>
+
+      <section class="panel active layout-2col" id="panel-analyze">
+        <div class="card card-side">
+          <div class="card-title">分析参数</div>
+          <form id="analyzeForm" class="grid">
+            <label>
+              <span>资产</span>
+              <select name="asset">
+                <option value="stock" selected>个股</option>
+                <option value="etf">ETF</option>
+                <option value="index">指数</option>
+              </select>
+            </label>
+            <label>
+              <span>代码/名称</span>
+              <input name="symbol" placeholder='例如：000001 / sh510300 / sh000300' required />
+            </label>
+            <label>
+              <span>频率</span>
+              <select name="freq">
+                <option value="weekly" selected>周线</option>
+                <option value="daily">日线</option>
+              </select>
+            </label>
+	            <label>
+	              <span>方法</span>
+	              <select name="method">
+	                <option value="all" selected>all（全跑）</option>
+	                <option value="both">both（缠论+威科夫）</option>
+	                <option value="institution">institution（机构痕迹）</option>
+	                <option value="chan">chan（缠论）</option>
+	                <option value="wyckoff">wyckoff（威科夫）</option>
+	                <option value="ichimoku">ichimoku（一目）</option>
+	                <option value="turtle">turtle（海龟）</option>
+                <option value="momentum">momentum（RSI/MACD/ADX）</option>
+                <option value="dow">dow（Dow 结构）</option>
+                <option value="vsa">vsa（VSA）</option>
+              </select>
+            </label>
+            <label>
+              <span>窗口</span>
+              <input name="window" type="number" min="50" max="5000" value="500" />
+            </label>
+            <label>
+              <span>开始日期</span>
+              <input name="start_date" placeholder="YYYYMMDD / YYYY-MM-DD（可空）" />
+            </label>
+            <label>
+              <span>结束日期</span>
+              <input name="end_date" placeholder="YYYYMMDD / YYYY-MM-DD（可空）" />
+            </label>
+            <label>
+              <span>复权（仅个股）</span>
+              <select name="adjust">
+                <option value="" selected>默认（qfq）</option>
+                <option value="qfq">qfq</option>
+                <option value="hfq">hfq</option>
+              </select>
+            </label>
+            <label>
+              <span>综合解读</span>
+              <div class="inline">
+                <label class="check">
+                  <input name="narrate" type="checkbox" />
+                  <span>用 LLM 生成自然语言解读</span>
+                </label>
+              </div>
+              <div class="muted small">需要配置 GEMINI_API_KEY/GEMINI_MODEL（或 OpenAI）。</div>
+            </label>
+            <label>
+              <span>解读模型</span>
+              <select name="narrate_provider">
+                <option value="openai" selected>openai（兼容中转站）</option>
+                <option value="gemini">gemini</option>
+              </select>
+            </label>
+            <label>
+              <span>解读流派</span>
+              <input
+                name="narrate_schools"
+                value="chan,wyckoff,ichimoku,turtle,momentum"
+                placeholder="逗号分隔，可加 dow,vsa 或 all"
+              />
+            </label>
+
+            <div class="actions">
+              <button class="btn primary" type="submit">开跑</button>
+            </div>
+          </form>
+        </div>
+
+        <div class="card card-side">
+          <div class="card-title">任务状态</div>
+          <div class="job">
+            <div class="job-row"><span class="k">Job</span><span class="v" id="jobId">-</span></div>
+            <div class="job-row"><span class="k">状态</span><span class="v" id="jobStatus">-</span></div>
+            <div class="job-row"><span class="k">输出</span><span class="v"><a id="jobOutDir" href="#" target="_blank" rel="noreferrer">-</a></span></div>
+            <div class="job-row">
+              <span class="k">进度</span>
+              <span class="v v-wrap">
+                <span class="muted" id="jobProgressText">-</span>
+                <div class="progress">
+                  <div class="progress-bar" id="jobProgressBar" style="width: 0%"></div>
+                </div>
+              </span>
+            </div>
+          </div>
+          <details class="logs">
+            <summary>日志</summary>
+            <pre id="jobLog"></pre>
+          </details>
+        </div>
+
+        <div class="card card-main">
+          <div class="card-title">结果</div>
+          <div id="resultEmpty" class="muted">先跑一遍任务，结果会出现在这里。</div>
+          <div id="resultGrid" class="result-grid"></div>
+	          <div class="narrative">
+	            <div class="table-title">综合解读（summary.md）</div>
+	            <div id="narrativeEmpty" class="muted">如果勾选了“综合解读”，任务结束后会在这里显示自然语言解读。</div>
+	            <pre id="narrativeText"></pre>
+	          </div>
+	          <div class="narrative">
+	            <div class="table-title">机构探测（institution.json）</div>
+	            <div id="institutionEmpty" class="muted">如果你选择 method=all 或 institution，任务结束后会在这里显示“机构痕迹”的量化摘要。</div>
+	            <pre id="institutionText"></pre>
+	          </div>
+	          <details class="json">
+	            <summary>JSON（最多展示前 20 个文件）</summary>
+	            <pre id="resultJson"></pre>
+	          </details>
+	        </div>
+      </section>
+
+      <section class="panel layout-2col" id="panel-scan">
+        <div class="card card-side">
+          <div class="card-title">扫描参数</div>
+          <form id="scanForm" class="grid">
+            <label>
+              <span>频率</span>
+              <select name="freq">
+                <option value="weekly" selected>周线</option>
+                <option value="daily">日线</option>
+              </select>
+            </label>
+            <label>
+              <span>每标的窗口</span>
+              <input name="window" type="number" min="100" max="2000" value="400" />
+            </label>
+            <label>
+              <span>最小周K</span>
+              <input name="min_weeks" type="number" min="0" max="2000" value="60" />
+            </label>
+            <label>
+              <span>只扫前 N 个</span>
+              <input name="limit" type="number" min="0" max="2000" value="0" />
+            </label>
+            <label>
+              <span>输出 TopK</span>
+              <input name="top_k" type="number" min="5" max="100" value="30" />
+            </label>
+            <label>
+              <span>最小成交额(最后一根)</span>
+              <input name="min_amount" type="number" min="0" step="1000000" value="0" />
+            </label>
+            <label>
+              <span>最小20日均成交额</span>
+              <input name="min_amount_avg20" type="number" min="0" step="1000000" value="0" />
+            </label>
+            <label>
+              <span>并发线程</span>
+              <input name="workers" type="number" min="1" max="32" value="8" />
+            </label>
+            <div class="actions">
+              <button class="btn primary" type="submit">开始扫描</button>
+              <button class="btn" type="button" id="scanDemo">先扫 200 个试试</button>
+            </div>
+          </form>
+        </div>
+
+        <div class="card card-side">
+          <div class="card-title">任务状态</div>
+          <div class="job">
+            <div class="job-row"><span class="k">Job</span><span class="v" data-job="id">-</span></div>
+            <div class="job-row"><span class="k">状态</span><span class="v" data-job="status">-</span></div>
+            <div class="job-row">
+              <span class="k">输出</span><span class="v"><a data-job="outdir" href="#" target="_blank" rel="noreferrer">-</a></span>
+            </div>
+            <div class="job-row">
+              <span class="k">进度</span>
+              <span class="v v-wrap">
+                <span class="muted" data-job="progressText">-</span>
+                <div class="progress">
+                  <div class="progress-bar" data-job="progressBar" style="width: 0%"></div>
+                </div>
+              </span>
+            </div>
+          </div>
+          <details class="logs">
+            <summary>日志</summary>
+            <pre data-job="log"></pre>
+          </details>
+        </div>
+
+		        <div class="card card-main">
+		          <div class="card-title">扫描结果</div>
+		          <div id="scanEmpty" class="muted">扫描完成后主看 BBB “能买清单”；趋势/回踩榜已折叠在“高级”里（不建议盯）。</div>
+		          <div class="table-title">BBB 能买清单（周线MACD + 位置 + 日线MACD）</div>
+		          <div id="bbbEtfRule" class="muted small"></div>
+		          <div id="bbbEtfFailStats" class="muted small" style="display: none"></div>
+		          <div id="bbbEtfEmpty" class="muted">如果这里为空，说明当前没有出现符合 BBB 条件的候选（可能源站数据延迟/抽风，或你要求太严格）。</div>
+		          <div id="bbbEtfTable"></div>
+		          <details class="advanced">
+		            <summary>高级：趋势/回踩榜（可选，不建议盯）</summary>
+		            <div class="two-col">
+		              <div>
+		                <div class="table-title">趋势候选（右侧突破）</div>
+		                <div id="trendTable"></div>
+		              </div>
+		              <div>
+		                <div class="table-title">回踩候选（站回确认）</div>
+		                <div id="swingTable"></div>
+		              </div>
+		            </div>
+		          </details>
+	        </div>
+	      </section>
+
+      <section class="panel layout-2col" id="panel-scan-stock">
+        <div class="card card-side">
+          <div class="card-title">全A 扫描参数</div>
+          <form id="scanStockForm" class="grid">
+            <label>
+              <span>频率</span>
+              <select name="freq">
+                <option value="weekly" selected>周线</option>
+                <option value="daily">日线</option>
+              </select>
+            </label>
+            <label>
+              <span>开始日期</span>
+              <input name="start_date" placeholder="YYYYMMDD（默认 20100101）" value="20100101" />
+            </label>
+            <label>
+              <span>结束日期</span>
+              <input name="end_date" placeholder="YYYYMMDD（可空）" />
+            </label>
+            <label>
+              <span>日线过滤</span>
+              <select name="daily_filter">
+                <option value="macd" selected>MACD（默认）</option>
+                <option value="ma20">MA20</option>
+                <option value="none">none</option>
+              </select>
+            </label>
+            <label>
+              <span>基础过滤</span>
+              <select name="base_filters">
+                <option value="trend_template" selected>trend_template（趋势模板）</option>
+                <option value="none">none（关闭）</option>
+              </select>
+            </label>
+            <label>
+              <span>趋势模板：高点回撤(%)</span>
+              <input name="tt_near_high_pct" type="number" min="0" max="95" step="1" value="25" />
+              <div class="muted small">例如 25 表示“距离52周高点不超过25%”。越小越严格。</div>
+            </label>
+            <label>
+              <span>趋势模板：远离低点(%)</span>
+              <input name="tt_above_low_pct" type="number" min="0" max="500" step="5" value="30" />
+              <div class="muted small">例如 30 表示“高于52周低点至少30%”。越大越严格。</div>
+            </label>
+            <label>
+              <span>趋势模板：MA40上行周数</span>
+              <input name="tt_slope_weeks" type="number" min="1" max="52" step="1" value="4" />
+              <div class="muted small">用 MA40 与 N 周前对比判断上行（默认 4）。</div>
+            </label>
+            <label>
+              <span>只扫前 N 个</span>
+              <input name="limit" type="number" min="0" max="6000" value="0" />
+            </label>
+            <label>
+              <span>输出 TopK</span>
+              <input name="top_k" type="number" min="5" max="200" value="50" />
+            </label>
+            <label>
+              <span>最小周成交额</span>
+              <input name="min_amount" type="number" min="0" step="10000000" value="50000000" />
+            </label>
+            <label>
+              <span>最低股价</span>
+              <input name="min_price" type="number" min="0" step="0.01" value="0" />
+            </label>
+            <label>
+              <span>最高股价</span>
+              <input name="max_price" type="number" min="0" step="0.01" value="0" />
+            </label>
+            <label>
+              <span>并发线程</span>
+              <input name="workers" type="number" min="1" max="32" value="8" />
+            </label>
+            <label class="checkbox">
+              <input type="checkbox" name="include_st" />
+              <span>包含 ST/*ST</span>
+            </label>
+            <label class="checkbox">
+              <input type="checkbox" name="exclude_bj" />
+              <span>排除北交所</span>
+            </label>
+
+            <div class="actions">
+              <button class="btn primary" type="submit">开始扫描</button>
+              <button class="btn" type="button" id="scanStockDemo">先扫 300 个试试</button>
+            </div>
+          </form>
+        </div>
+
+        <div class="card card-side">
+          <div class="card-title">任务状态</div>
+          <div class="job">
+            <div class="job-row"><span class="k">Job</span><span class="v" data-job="id">-</span></div>
+            <div class="job-row"><span class="k">状态</span><span class="v" data-job="status">-</span></div>
+            <div class="job-row">
+              <span class="k">输出</span><span class="v"><a data-job="outdir" href="#" target="_blank" rel="noreferrer">-</a></span>
+            </div>
+            <div class="job-row">
+              <span class="k">进度</span>
+              <span class="v v-wrap">
+                <span class="muted" data-job="progressText">-</span>
+                <div class="progress">
+                  <div class="progress-bar" data-job="progressBar" style="width: 0%"></div>
+                </div>
+              </span>
+            </div>
+          </div>
+          <details class="logs">
+            <summary>日志</summary>
+            <pre data-job="log"></pre>
+          </details>
+        </div>
+
+        <div class="card card-main">
+          <div class="card-title">扫描结果（候选）</div>
+          <div id="stockEmpty" class="muted">扫描完成后会生成三份榜单：趋势突破 / 回踩站回 / 左侧捡漏（优先看胜率/磨损）。</div>
+          <div class="two-col">
+            <div>
+              <div class="table-title">趋势突破（右侧确认）</div>
+              <div id="stockTrendTable"></div>
+            </div>
+            <div>
+              <div class="table-title">回踩站回（右侧确认）</div>
+              <div id="stockSwingTable"></div>
+            </div>
+            <div>
+              <div class="table-title">左侧捡漏（回踩MA50不破）</div>
+              <div id="stockDipTable"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" id="panel-about">
+        <div class="card">
+          <div class="card-title">说明</div>
+          <div class="text">
+            <p>这是个研究/复盘工具，不是投资建议，更不是自动下单系统。</p>
+            <p>核心思路：同一份数据跑多套方法（脚本能算的就脚本算；不适合脚本化的就提示词驱动输出 JSON），方便横向对比。</p>
+            <p>如果你看到中文字体缺字警告，去 README 按 <code>--font-path</code> 配个中文字体就完事。</p>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer">
+      <span>免责声明：研究工具，不构成投资建议。</span>
+    </footer>
+
+		    <script src="/static/app.js?v=20260105_11"></script>
+	  </body>
+	</html>
