@@ -1,0 +1,24 @@
+[
+  {
+    "trade_id": "T20260116_0001",
+    "datetime": "2026-01-16 09:31:05",
+    "symbol": "sh512120",
+    "side": "buy",
+    "price": 0.483,
+    "shares": 4000,
+    "fee": 1.2,
+    "tax": 0,
+    "order_id": "OID123"
+  },
+  {
+    "trade_id": "T20260116_0002",
+    "datetime": "2026-01-16 10:15:00",
+    "symbol": "sh510150",
+    "side": "sell",
+    "price": 0.6,
+    "shares": 1000,
+    "fee": 1.0,
+    "tax": 0,
+    "order_id": "OID124"
+  }
+]

@@ -1,0 +1,29 @@
+import tushare as ts
+
+# ⚠️ 注意：别把 token / 私有代理地址硬编码进仓库（尤其是公开仓库），用环境变量/本地 .env。
+pro = ts.pro_api("YOUR_TUSHARE_TOKEN_OR_EMPTY")
+# ⬇️⬇️某些“代理教程”要求改私有字段（不推荐；项目代码已封装在 llm_trading/tushare_source.py）
+pro._DataApi__token = "YOUR_TUSHARE_TOKEN"
+pro._DataApi__http_url = "https://your-tushare-proxy.example.com/dataapi"  # 可选：私有代理
+# ⬆️⬆️示例到此为止⬆️⬆️
+
+#【❗💡💡 同理，在你已有代码中，搜索 pro_api 所在行，随后在pro_api添加以上两行】
+
+# ---- daily 日线接口 ----
+df = pro.daily(trade_date='20180810',limit=20)
+print(df)
+
+# ---  交易日历 --- 
+df_cal = pro.trade_cal(exchange='', start_date='20250101', end_date='20251231' ,limit=5, offset=0)
+print(df_cal) 
+
+# ------  5000积分接口验证 ------ 
+# dfkpl_concept_cons = pro.kpl_concept_cons(trade_date='20241014')
+# print(dfkpl_concept_cons)
+
+# ------ 10000积分接口验证 ------
+# dflimit_list_ths = pro.limit_list_ths(trade_date='20241125', limit_type='涨停池', fields='ts_code,trade_date,tag,status,lu_desc')
+# print(dflimit_list_ths)
+
+# {集合竞价接口.与积分无关,需stk_mins独立权限}
+# df = pro.stk_auction_o(trade_date='20251204')

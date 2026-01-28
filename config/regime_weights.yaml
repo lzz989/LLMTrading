@@ -1,0 +1,28 @@
+# 动态权重（Phase4：regime-aware；必须配合 walk-forward 验证）
+# 说明：
+# - 这是“手工权重表”（粗粒度、少参数）
+# - 权重必须 >=0；不要求严格和为1（代码会自动归一化）
+
+regime_weights:
+  bull:
+    ma_cross: 0.30
+    momentum: 0.25
+    rsi: 0.10
+    regime: 0.15
+    volume_ratio: 0.20
+
+  bear:
+    ma_cross: 0.15
+    momentum: 0.10
+    rsi: 0.25
+    atr: 0.20
+    regime: 0.30
+
+  neutral:
+    ma_cross: 0.20
+    macd: 0.15
+    rsi: 0.15
+    bollinger: 0.15
+    volume_ratio: 0.15
+    regime: 0.20
+

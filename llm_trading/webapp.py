@@ -101,7 +101,7 @@ class JobManager:
                         job.status = "succeeded" if rc == 0 else "failed"
                         if rc != 0:
                             job.error = f"子进程退出码={rc}"
-            except Exception as exc:  # noqa: BLE001
+            except (TypeError, ValueError, OverflowError, AttributeError) as exc:  # noqa: BLE001
                 with self._lock:
                     job.return_code = -1
                     job.ended_at = time.time()
@@ -150,7 +150,7 @@ class JobManager:
             if len(data) > max_bytes:
                 data = data[-max_bytes:]
             return data.decode("utf-8", errors="replace")
-        except Exception:  # noqa: BLE001
+        except (AttributeError):  # noqa: BLE001
             return ""
 
 
@@ -439,7 +439,7 @@ def create_app():
             p = job.out_dir / rel
             try:
                 payload.setdefault("json", {})[rel] = json.loads(p.read_text(encoding="utf-8"))
-            except Exception:  # noqa: BLE001
+            except (KeyError, IndexError, AttributeError):  # noqa: BLE001
                 continue
         return sanitize_for_json(payload)
 

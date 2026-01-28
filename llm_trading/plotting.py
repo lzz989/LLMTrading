@@ -20,7 +20,7 @@ def _ensure_matplotlib_cache_dir():
         cache_dir = root / ".matplotlib"
         cache_dir.mkdir(parents=True, exist_ok=True)
         os.environ["MPLCONFIGDIR"] = str(cache_dir)
-    except Exception:  # noqa: BLE001
+    except (AttributeError):  # noqa: BLE001
         return
 
 
@@ -71,13 +71,13 @@ def _ensure_cjk_font_file(*, filename: str, url: str) -> str | None:
     except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError):  # noqa: PERF203
         try:
             tmp.unlink(missing_ok=True)
-        except Exception:  # noqa: BLE001
+        except OSError:  # noqa: BLE001
             pass
         return None
-    except Exception:  # noqa: BLE001
+    except (OSError, ValueError, TypeError, RuntimeError):  # noqa: BLE001
         try:
             tmp.unlink(missing_ok=True)
-        except Exception:  # noqa: BLE001
+        except (OSError, AttributeError):  # noqa: BLE001
             pass
         return None
 
@@ -94,7 +94,7 @@ def setup_chinese_font(preferred: str | None = None, *, font_path: str | None = 
         try:
             font_manager.fontManager.addfont(fp)
             name = font_manager.FontProperties(fname=fp).get_name()
-        except Exception as exc:  # noqa: BLE001
+        except (AttributeError) as exc:  # noqa: BLE001
             raise RuntimeError(f"加载字体失败：{fp}") from exc
 
         matplotlib.rcParams["font.sans-serif"] = [name, *fallback]
@@ -136,7 +136,7 @@ def setup_chinese_font(preferred: str | None = None, *, font_path: str | None = 
         try:
             font_manager.fontManager.addfont(noto_path)
             name = font_manager.FontProperties(fname=noto_path).get_name()
-        except Exception:  # noqa: BLE001
+        except (OSError, TypeError, ValueError, AttributeError, RuntimeError):  # noqa: BLE001
             name = None
         if name:
             matplotlib.rcParams["font.sans-serif"] = [name]
@@ -153,7 +153,7 @@ def setup_chinese_font(preferred: str | None = None, *, font_path: str | None = 
 def _parse_date(s: str) -> datetime | None:
     try:
         return datetime.strptime(s, "%Y-%m-%d")
-    except Exception:  # noqa: BLE001
+    except (TypeError, ValueError, AttributeError):  # noqa: BLE001
         return None
 
 

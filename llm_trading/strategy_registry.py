@@ -238,15 +238,15 @@ def filter_trend_template_weekly(df: pd.DataFrame) -> pd.Series:
     p = get_trend_template_params()
     try:
         near_high_pct = float(p.get("near_high") or 0.25)
-    except Exception:  # noqa: BLE001
+    except (TypeError, ValueError, OverflowError, AttributeError):  # noqa: BLE001
         near_high_pct = 0.25
     try:
         above_low_pct = float(p.get("above_low") or 0.30)
-    except Exception:  # noqa: BLE001
+    except (TypeError, ValueError, OverflowError, AttributeError):  # noqa: BLE001
         above_low_pct = 0.30
     try:
         slope_weeks = int(p.get("slope_weeks") or 4)
-    except Exception:  # noqa: BLE001
+    except (TypeError, ValueError, OverflowError, AttributeError):  # noqa: BLE001
         slope_weeks = 4
     slope_weeks = max(1, min(int(slope_weeks), 52))
 

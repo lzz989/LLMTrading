@@ -1,0 +1,27 @@
+[run]
+branch = True
+source = llm_trading
+relative_files = True
+
+[report]
+# Phase5：先把“核心可单测模块”的覆盖率做起来（避免被 IO/命令包装/大脚本稀释）。
+# 注意：这不是全仓覆盖率；全仓要靠集成测试逐步补齐。
+include =
+    llm_trading/backtest.py
+    llm_trading/data_cache.py
+    llm_trading/diagnostics.py
+    llm_trading/orders_next_open.py
+    llm_trading/signals_merge.py
+    llm_trading/warehouse.py
+    llm_trading/cash_signal.py
+    llm_trading/opportunity_score.py
+    llm_trading/position_sizing.py
+    llm_trading/strategy_config_loader.py
+    llm_trading/vsa.py
+    llm_trading/factors/*.py
+omit =
+    llm_trading/factors/research.py
+    llm_trading/factors/dynamic_weights.py
+show_missing = True
+skip_covered = True
+

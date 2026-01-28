@@ -1,15 +1,15 @@
 from __future__ import annotations
 
-import math
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from .akshare_source import DataSourceError, FetchParams, fetch_daily
-from .backtest import forward_holding_backtest
+from .akshare_source import DataSourceError, FetchParams
+from .backtest import forward_holding_backtest, score_forward_stats, shrunk_win_rate
+from .data_cache import fetch_daily_cached
 from .indicators import add_donchian_channels, add_macd, add_moving_averages
 from .resample import resample_to_weekly
+from .quality_gate import StockQualityGate, forbid_by_symbol_name, passes_stock_quality_gate
 
 
 ScanFreq = Literal["daily", "weekly"]
@@ -47,6 +47,52 @@ def load_stock_universe(*, include_st: bool = False, include_bj: bool = True) ->
     """
     全A股票列表（含北交所）。
     """
+    # 优先读本地缓存（避免每次都打 AkShare，且网络不稳时 scan-stock 直接崩）
+    # 缓存由 symbol_names.py 写出：data/cache/universe/stock_names.json
+    try:
+        import json
+
+        cache_p = Path("data") / "cache" / "universe" / "stock_names.json"
+        if cache_p.exists():
+            obj = json.loads(cache_p.read_text(encoding="utf-8"))
+            items_map = obj.get("items") if isinstance(obj, dict) else None
+            if isinstance(items_map, dict) and items_map:
+                out: list[StockUniverseItem] = []
+                for sym, name in items_map.items():
+                    s = str(sym or "").strip().lower()
+                    n = str(name or "").strip().replace(" ", "")
+                    if not s or not n:
+                        continue
+                    if (not include_st) and ("ST" in n.upper()):
+                        continue
+                    if (not include_bj) and s.startswith("bj"):
+                        continue
+                    # 缓存里已是 sh/sz/bj 前缀
+                    if not (len(s) == 8 and s[:2] in {"sh", "sz", "bj"} and s[2:].isdigit()):
+                        continue
+                    out.append(StockUniverseItem(symbol=s, name=n))
+
+                def sort_key(x: StockUniverseItem):
+                    sym2 = x.symbol.lower()
+                    market_rank = 9
+                    code = 0
+                    if sym2.startswith("sh"):
+                        market_rank = 0
+                        code = int(sym2[2:] or "0")
+                    elif sym2.startswith("sz"):
+                        market_rank = 1
+                        code = int(sym2[2:] or "0")
+                    elif sym2.startswith("bj"):
+                        market_rank = 2
+                        code = int(sym2[2:] or "0")
+                    return (market_rank, code, sym2)
+
+                out.sort(key=sort_key)
+                return out
+    except (OSError, TypeError, ValueError, KeyError, AttributeError):  # noqa: BLE001
+        # 缓存坏了就回退在线抓取
+        pass
+
     _require_akshare()
     import akshare as ak
 
@@ -91,6 +137,136 @@ def load_stock_universe(*, include_st: bool = False, include_bj: bool = True) ->
     return items
 
 
+def load_index_stock_universe(*, index_symbol: str = "000300", cache_ttl_hours: float = 24.0) -> list[StockUniverseItem]:
+    """
+    指数成分股列表（更适合作为“自动股票池”）：
+    - 默认：000300=沪深300（流动性相对更好，避免全A太慢/太杂）
+    """
+    idx = str(index_symbol or "").strip()
+    if idx.isdigit():
+        idx = idx.zfill(6)
+    if not idx:
+        idx = "000300"
+
+    # 优先读本地缓存：避免每次都打 AkShare（不稳+慢），也能减少“跑批时拉不到成分”的偶发失败。
+    try:
+        import json
+        import time
+
+        cache_dir = Path("data") / "cache" / "universe"
+        cache_p = cache_dir / f"index_{idx}.json"
+        ttl = float(cache_ttl_hours or 0.0)
+        if ttl > 0 and cache_p.exists():
+            age_h = (time.time() - float(cache_p.stat().st_mtime)) / 3600.0
+            if age_h <= ttl:
+                obj = json.loads(cache_p.read_text(encoding="utf-8"))
+                items_map = obj.get("items") if isinstance(obj, dict) else None
+                if isinstance(items_map, dict) and items_map:
+                    out: list[StockUniverseItem] = []
+                    for sym, name in items_map.items():
+                        s = str(sym or "").strip().lower()
+                        n = str(name or "").strip().replace(" ", "")
+                        if not s:
+                            continue
+                        if not (len(s) == 8 and s[:2] in {"sh", "sz", "bj"} and s[2:].isdigit()):
+                            continue
+                        out.append(StockUniverseItem(symbol=s, name=(n or s)))
+
+                    def sort_key(x: StockUniverseItem):
+                        sym = x.symbol.lower()
+                        market_rank = 9
+                        code = 0
+                        if sym.startswith("sh"):
+                            market_rank = 0
+                            code = int(sym[2:] or "0")
+                        elif sym.startswith("sz"):
+                            market_rank = 1
+                            code = int(sym[2:] or "0")
+                        elif sym.startswith("bj"):
+                            market_rank = 2
+                            code = int(sym[2:] or "0")
+                        return (market_rank, code, sym)
+
+                    out.sort(key=sort_key)
+                    return out
+    except (OSError, TypeError, ValueError, KeyError, AttributeError):  # noqa: BLE001
+        pass
+
+    _require_akshare()
+    import akshare as ak
+
+    df = None
+    try:
+        df = ak.index_stock_cons_csindex(symbol=idx)
+    except Exception:  # noqa: BLE001
+        df = None
+    if df is None or getattr(df, "empty", True):
+        try:
+            df = ak.index_stock_cons_sina(symbol=idx)
+        except Exception:  # noqa: BLE001
+            df = None
+
+    if df is None or getattr(df, "empty", True):
+        return []
+
+    code_col = "成分券代码" if "成分券代码" in df.columns else None
+    name_col = "成分券名称" if "成分券名称" in df.columns else None
+    if code_col is None:
+        return []
+
+    items: list[StockUniverseItem] = []
+    seen: set[str] = set()
+    for _, row in df.iterrows():
+        code = str(row.get(code_col, "")).strip()
+        if not code:
+            continue
+        sym = _code_to_prefixed_symbol(code)
+        if not sym or sym in seen:
+            continue
+        seen.add(sym)
+
+        name = str(row.get(name_col, "")).strip().replace(" ", "") if name_col is not None else ""
+        if not name:
+            name = sym
+        items.append(StockUniverseItem(symbol=sym, name=name))
+
+    def sort_key(x: StockUniverseItem):
+        sym = x.symbol.lower()
+        market_rank = 9
+        code = 0
+        if sym.startswith("sh"):
+            market_rank = 0
+            code = int(sym[2:] or "0")
+        elif sym.startswith("sz"):
+            market_rank = 1
+            code = int(sym[2:] or "0")
+        elif sym.startswith("bj"):
+            market_rank = 2
+            code = int(sym[2:] or "0")
+        return (market_rank, code, sym)
+
+    items.sort(key=sort_key)
+
+    # 写缓存（失败不影响结果）
+    try:
+        import json
+        from datetime import datetime
+
+        cache_dir = Path("data") / "cache" / "universe"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        cache_p = cache_dir / f"index_{idx}.json"
+        obj = {
+            "generated_at": datetime.now().isoformat(),
+            "index_symbol": str(idx),
+            "items": {it.symbol: it.name for it in items},
+        }
+        cache_p.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+    except (OSError, TypeError, ValueError, KeyError, AttributeError):  # noqa: BLE001
+        pass
+
+    return items
+
+
 def _ensure_ohlc(df):
     df_local = df
     if "high" not in df_local.columns or "low" not in df_local.columns:
@@ -105,37 +281,6 @@ def _ensure_ohlc(df):
         df_local = df_local.copy()
         df_local["volume"] = 0.0
     return df_local
-
-
-def _fetch_daily_cached(params: FetchParams, *, cache_dir: Path, ttl_hours: float) -> Any:
-    """
-    简单缓存：同一天里反复扫全A，不要每次都把源站薅秃。
-    """
-    try:
-        import pandas as pd
-    except ModuleNotFoundError as exc:
-        raise RuntimeError("没装 pandas？先跑：pip install -r \"requirements.txt\"") from exc
-
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    adjust = params.adjust if params.adjust is not None else "qfq"
-    key = f"{params.asset}_{params.symbol}_{adjust}.csv".replace("/", "_").replace("\\", "_")
-    path = cache_dir / key
-
-    if path.exists() and ttl_hours > 0:
-        age = time.time() - path.stat().st_mtime
-        if age <= float(ttl_hours) * 3600.0:
-            df = pd.read_csv(path, encoding="utf-8")
-            if "date" in df.columns:
-                df["date"] = pd.to_datetime(df["date"], errors="coerce")
-                df = df.dropna(subset=["date"]).sort_values("date").reset_index(drop=True)
-            return df
-
-    df2 = fetch_daily(params)
-    try:
-        df2.to_csv(path, index=False, encoding="utf-8")
-    except Exception:  # noqa: BLE001
-        pass
-    return df2
 
 
 def _align_daily_filter_ma20(df_daily, df_weekly):
@@ -214,16 +359,6 @@ def _align_daily_filter_macd(df_daily, df_weekly):
     return dfw
 
 
-def _score_from_stats(stats) -> float:
-    # 艹，这玩意儿就是排序用的“经验分”，别当圣经。
-    if stats is None or getattr(stats, "trades", 0) <= 0:
-        return 0.0
-    mae_penalty = 0.0
-    if stats.avg_mae is not None:
-        mae_penalty = abs(float(stats.avg_mae)) * 100.0
-    return float(stats.win_rate) * 100.0 + float(stats.avg_return) * 80.0 - mae_penalty * 0.6 + math.log(stats.trades + 1.0) * 3.0
-
-
 def analyze_stock_symbol(
     item: StockUniverseItem,
     *,
@@ -249,16 +384,40 @@ def analyze_stock_symbol(
     if not horizons2:
         horizons2 = [8]
 
+    # 硬过滤：先用 symbol/name 做快筛，别浪费时间抓一堆杂毛/妖股数据
+    gate = StockQualityGate()
+    ok_basic, reasons_basic = forbid_by_symbol_name(symbol=item.symbol, name=item.name, gate=gate)
+    if not bool(ok_basic):
+        # 注意：这里不是 error（源站失败），是“系统拒绝交易的标的”
+        return {
+            "symbol": item.symbol,
+            "name": item.name,
+            "filtered": True,
+            "filter_reason": list(reasons_basic),
+            "quality_gate": {"ok": False, "reasons": list(reasons_basic), "stage": "symbol_name"},
+        }
+
     try:
-        df_daily = _fetch_daily_cached(
+        df_daily = fetch_daily_cached(
             FetchParams(asset="stock", symbol=item.symbol, start_date=start_date, end_date=end_date, adjust=adjust),
             cache_dir=cache_dir or (Path("data") / "cache" / "stock"),
             ttl_hours=float(cache_ttl_hours),
         )
     except DataSourceError as exc:
         return {"symbol": item.symbol, "name": item.name, "error": str(exc)}
-    except Exception as exc:  # noqa: BLE001
+    except (TypeError, ValueError, OverflowError, AttributeError) as exc:  # noqa: BLE001
         return {"symbol": item.symbol, "name": item.name, "error": str(exc)}
+
+    # 硬过滤：流动性/低价等（需要日线才能算）
+    q = passes_stock_quality_gate(symbol=item.symbol, name=item.name, df_daily=df_daily, gate=gate)
+    if not bool(q.get("ok")):
+        return {
+            "symbol": item.symbol,
+            "name": item.name,
+            "filtered": True,
+            "filter_reason": list(q.get("reasons") or []),
+            "quality_gate": q,
+        }
 
     if freq == "weekly":
         try:
@@ -321,7 +480,7 @@ def analyze_stock_symbol(
     def fnum(v):
         try:
             return None if v is None else float(v)
-        except Exception:  # noqa: BLE001
+        except (TypeError, ValueError, OverflowError, KeyError, IndexError, AttributeError):  # noqa: BLE001
             return None
 
     close_last = fnum(last.get("close"))
@@ -344,6 +503,7 @@ def analyze_stock_symbol(
     out: dict[str, Any] = {
         "symbol": item.symbol,
         "name": item.name,
+        "quality_gate": q,
         "date": str(last.get("date").date()) if hasattr(last.get("date"), "date") else str(last.get("date")),
         "close": close_last,
         "amount": amount_last,
@@ -387,7 +547,7 @@ def analyze_stock_symbol(
                     sell_cost=float(sell_cost),
                     non_overlapping=bool(non_overlapping),
                 )
-            except Exception as exc:  # noqa: BLE001
+            except (TypeError, ValueError, OverflowError) as exc:  # noqa: BLE001
                 out["forward"][which][f"{h}w"] = {"error": str(exc)}
                 continue
             out["forward"][which][f"{h}w"] = {
@@ -395,6 +555,7 @@ def analyze_stock_symbol(
                 "trades": stats.trades,
                 "wins": stats.wins,
                 "win_rate": stats.win_rate,
+                "win_rate_shrunk": shrunk_win_rate(wins=int(stats.wins), trades=int(stats.trades)),
                 "avg_return": stats.avg_return,
                 "median_return": stats.median_return,
                 "avg_mae": stats.avg_mae,
@@ -411,6 +572,74 @@ def analyze_stock_symbol(
         if rank_h not in horizons2:
             rank_h = 8 if 8 in horizons2 else horizons2[-1]
         st = stats_rank.get(rank_h)
-        out["scores"][which] = _score_from_stats(st) + float(ma200_bonus)
+        out["scores"][which] = score_forward_stats(st) + float(ma200_bonus)
+
+    # Phase2：OpportunityScore（0~1），用于 scan-stock 的 --min-score 过滤（默认不影响原有信号口径）
+    try:
+        from datetime import datetime
+
+        as_of_s = str(out.get("date") or "").strip()
+        try:
+            as_of_d = datetime.strptime(as_of_s, "%Y-%m-%d").date() if as_of_s else datetime.now().date()
+        except (TypeError, ValueError, AttributeError):  # noqa: BLE001
+            as_of_d = datetime.now().date()
+
+        # trap_risk：liquidity_trap.score（0~1）
+        trap_risk = None
+        try:
+            from .factors.game_theory import LiquidityTrapFactor
+
+            r_trap = LiquidityTrapFactor().compute(df)
+            try:
+                trap_risk = None if r_trap.score is None else float(r_trap.score)
+            except (TypeError, ValueError, OverflowError, AttributeError):  # noqa: BLE001
+                trap_risk = None
+        except (TypeError, ValueError, OverflowError, AttributeError):  # noqa: BLE001
+            trap_risk = None
+
+        # key_level：默认 ma50（缺就 close）
+        lv = out.get("levels") if isinstance(out.get("levels"), dict) else {}
+        kl_name = "ma50"
+        kl_value = lv.get("ma50")
+        if kl_value is None:
+            kl_name = "close"
+            kl_value = out.get("close")
+
+        from .opportunity_score import OpportunityScoreInputs, compute_opportunity_score
+
+        opp = compute_opportunity_score(
+            df=df,
+            inputs=OpportunityScoreInputs(
+                symbol=str(item.symbol),
+                asset="stock",
+                as_of=as_of_d,
+                ref_date=as_of_d,
+                min_score=0.70,
+                t_plus_one=True,
+                trap_risk=trap_risk,
+                fund_flow=None,
+                expected_holding_days=int(max(1, int(rank_horizon) * 5)),
+            ),
+            key_level_name=str(kl_name),
+            key_level_value=(None if kl_value is None else float(kl_value)),
+        )
+
+        out["trap_risk"] = trap_risk
+        if isinstance(opp, dict):
+            try:
+                out["opp_score"] = None if opp.get("total_score") is None else float(opp.get("total_score"))
+            except (TypeError, ValueError, OverflowError, AttributeError):  # noqa: BLE001
+                out["opp_score"] = None
+            out["opp_bucket"] = str(opp.get("bucket") or "").strip() or None
+            out["opp_verdict"] = str(opp.get("verdict") or "").strip() or None
+        else:
+            out["opp_score"] = None
+            out["opp_bucket"] = None
+            out["opp_verdict"] = None
+    except (AttributeError):  # noqa: BLE001
+        out["opp_score"] = None
+        out["opp_bucket"] = None
+        out["opp_verdict"] = None
+        out["trap_risk"] = None
 
     return out

@@ -6,7 +6,7 @@ import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
-from .config import GeminiConfig, OpenAIConfig
+from .config import EmbeddingsConfig, GeminiConfig, OpenAIConfig
 
 
 class LlmError(RuntimeError):
@@ -133,5 +133,53 @@ def gemini_generate_content(
         if out:
             return out
         raise KeyError("empty text parts")
-    except Exception as exc:  # noqa: BLE001
+    except (AttributeError) as exc:  # noqa: BLE001
         raise LlmError(f"Gemini 返回结构异常：{raw[:500]}") from exc
+
+
+def openai_embeddings(cfg: EmbeddingsConfig, *, inputs: list[str]) -> list[list[float]]:
+    """
+    OpenAI-compatible embeddings API.
+    Endpoint: POST {base_url}/v1/embeddings (or /embeddings if base_url already ends with /v1)
+    """
+
+    base = cfg.base_url.rstrip("/")
+    if base.endswith("/v1"):
+        url = base + "/embeddings"
+    else:
+        url = base + "/v1/embeddings"
+
+    payload = {"model": cfg.model, "input": inputs}
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+
+    headers = {
+        "Authorization": f"Bearer {cfg.api_key}",
+        "Content-Type": "application/json",
+    }
+    if cfg.headers:
+        # 兼容一些代理要额外 headers（org/project/custom auth 等）
+        headers.update({str(k): str(v) for k, v in cfg.headers.items() if str(k).strip()})
+
+    req = urllib.request.Request(url=url, data=data, method="POST", headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            raw = resp.read().decode("utf-8")
+    except urllib.error.HTTPError as exc:
+        body = exc.read().decode("utf-8", errors="replace") if exc.fp else ""
+        raise LlmError(f"Embeddings HTTPError {exc.code}: {body}") from exc
+    except urllib.error.URLError as exc:
+        raise LlmError(f"Embeddings URLError: {exc}") from exc
+
+    try:
+        obj: dict[str, Any] = json.loads(raw)
+        data = obj.get("data") or []
+        out: list[list[float]] = []
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            emb = item.get("embedding")
+            if isinstance(emb, list):
+                out.append([float(x) for x in emb])
+        return out
+    except Exception as exc:  # noqa: BLE001
+        raise LlmError(f"Embeddings 返回解析失败：{raw[:500]}") from exc

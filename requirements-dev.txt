@@ -1,0 +1,4 @@
+coverage>=7.0,<8.0
+# 仅在某些 Python/Conda 环境里 stdlib sqlite3 模块坏掉时需要（coverage.py 依赖 sqlite3）。
+pysqlite3-binary>=0.5.3
+

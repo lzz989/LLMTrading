@@ -7,7 +7,7 @@ from typing import Any
 def _is_bad_float(x: float) -> bool:
     try:
         return math.isnan(x) or math.isinf(x)
-    except Exception:  # noqa: BLE001
+    except (TypeError, ValueError, OverflowError, AttributeError):  # noqa: BLE001
         return False
 
 
@@ -45,12 +45,12 @@ def sanitize_for_json(obj: Any) -> Any:
 
         if isinstance(obj, np.generic):
             return sanitize_for_json(obj.item())
-    except Exception:  # noqa: BLE001
+    except (AttributeError):  # noqa: BLE001
         pass
 
     # 兜底：别让 json.dumps 报类型错误
     try:
         return str(obj)
-    except Exception:  # noqa: BLE001
+    except (AttributeError):  # noqa: BLE001
         return None
 

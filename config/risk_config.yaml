@@ -1,0 +1,19 @@
+# 风控配置模板（Phase5：工程化风控，不等于“自动下单”）
+# - 目前主要用于研究/报告/参数统一
+
+account_risk:
+  max_daily_drawdown: 0.05
+  max_weekly_drawdown: 0.10
+  max_total_drawdown: 0.20
+  cooldown_days_after_circuit: 5
+
+position_limits:
+  max_single_position: 0.30
+  max_sector_concentration: 0.40
+  max_correlation_threshold: 0.85
+
+stop_loss:
+  default_pct: 0.06
+  trailing_activation: 0.10
+  trailing_distance: 0.05
+

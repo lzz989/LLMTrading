@@ -16,7 +16,7 @@ def _to_float(x: Any, *, default: float | None = None) -> float | None:
         if v != v:  # NaN
             return default
         return v
-    except Exception:  # noqa: BLE001
+    except (TypeError, ValueError, OverflowError):  # noqa: BLE001
         return default
 
 
@@ -120,7 +120,7 @@ def _try_fetch_stock_fund_flow(symbol_prefixed: str) -> dict[str, Any] | None:
             return None
         try:
             return float(df2[c].tail(n).astype(float).sum())
-        except Exception:  # noqa: BLE001
+        except (TypeError, ValueError, OverflowError, AttributeError):  # noqa: BLE001
             return None
 
     def mean_tail(c: str | None, n: int) -> float | None:
@@ -128,7 +128,7 @@ def _try_fetch_stock_fund_flow(symbol_prefixed: str) -> dict[str, Any] | None:
             return None
         try:
             return float(df2[c].tail(n).astype(float).mean())
-        except Exception:  # noqa: BLE001
+        except (TypeError, ValueError, OverflowError, AttributeError):  # noqa: BLE001
             return None
 
     last_dt = df2.iloc[-1][c_date]
@@ -202,12 +202,12 @@ def compute_institution_report(
     if "ad_line" not in df2.columns:
         try:
             from .indicators import add_accumulation_distribution_line
-        except Exception:  # noqa: BLE001
+        except (AttributeError):  # noqa: BLE001
             add_accumulation_distribution_line = None
         if add_accumulation_distribution_line is not None:
             try:
                 df2 = add_accumulation_distribution_line(df2)
-            except Exception:  # noqa: BLE001
+            except (AttributeError):  # noqa: BLE001
                 pass
 
     close_s = df2["close"].astype(float)
@@ -227,17 +227,17 @@ def compute_institution_report(
         try:
             if "ad_line" in df2.columns:
                 ad_delta_20 = _to_float(float(df2.iloc[-1]["ad_line"]) - float(df2.iloc[-21]["ad_line"]))
-        except Exception:  # noqa: BLE001
+        except (TypeError, ValueError, OverflowError, KeyError, IndexError, AttributeError):  # noqa: BLE001
             ad_delta_20 = None
         try:
             obv_delta_20 = _to_float(float(df2.iloc[-1]["obv"]) - float(df2.iloc[-21]["obv"]))
-        except Exception:  # noqa: BLE001
+        except (TypeError, ValueError, OverflowError, KeyError, IndexError, AttributeError):  # noqa: BLE001
             obv_delta_20 = None
 
     try:
         tail_obv = df2["obv"].tail(20).astype(float).tolist()
         obv_slope_20 = _linear_slope(tail_obv)
-    except Exception:  # noqa: BLE001
+    except (AttributeError):  # noqa: BLE001
         obv_slope_20 = None
 
     # VSA 偏置（用最后一根量价特征做一个粗糙方向锚）
@@ -269,7 +269,7 @@ def compute_institution_report(
             vsa_bias -= 0.8
         if vol_level in {"high", "very_high"} and spread_level == "wide" and (close_pos is not None and close_pos <= 0.25):
             vsa_bias -= 1.0
-    except Exception:  # noqa: BLE001
+    except (AttributeError):  # noqa: BLE001
         vsa_summary = None
 
     fund_flow = None

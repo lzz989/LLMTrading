@@ -13,7 +13,7 @@ def _to_float(x: Any, *, default: float = 0.0) -> float:
         if x is None:
             return float(default)
         return float(x)
-    except Exception:  # noqa: BLE001
+    except (TypeError, ValueError, OverflowError, AttributeError):  # noqa: BLE001
         return float(default)
 
 
@@ -133,7 +133,7 @@ def compute_vsa_report(
         try:
             v = last.get(key)
             return None if v is None else float(v)
-        except Exception:  # noqa: BLE001
+        except (TypeError, ValueError, OverflowError, AttributeError):  # noqa: BLE001
             return None
 
     rel_vol = f(prefix + "rel_volume")

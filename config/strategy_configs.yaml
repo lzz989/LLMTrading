@@ -1,0 +1,103 @@
+# 策略配置（Phase3：策略迁移到因子配置）
+# - 这是“研究配置”，默认不影响现有 scan/analyze/run 口径
+# - factor 名称必须是 llm_trading/factors/ 里注册过的因子（见 FACTOR_REGISTRY）
+
+strategies:
+  bbb_weekly:
+    description: "BBB 复刻版（先按因子组合粗略复刻；对齐口径用 strategy-align 做偏离率报告）"
+    factor_weights:
+      ma_cross: 0.25
+      macd: 0.20
+      regime: 0.30
+      pullback: 0.15
+      atr: 0.10
+    entry_threshold: 0.65
+    exit_threshold: 0.35
+    allowed_regimes: ["bull", "neutral"]
+
+  aggressive:
+    description: "激进（动量更高权重；只在 bull/neutral）"
+    factor_weights:
+      momentum: 0.30
+      roc: 0.25
+      volume_ratio: 0.20
+      macd: 0.15
+      regime: 0.10
+    entry_threshold: 0.60
+    exit_threshold: 0.35
+    allowed_regimes: ["bull", "neutral"]
+
+  conservative:
+    description: "保守（环境/波动更高权重；只做 bull/neutral）"
+    factor_weights:
+      ma_cross: 0.20
+      regime: 0.40
+      atr: 0.20
+      pullback: 0.20
+    entry_threshold: 0.70
+    exit_threshold: 0.45
+    allowed_regimes: ["bull", "neutral"]
+
+  left_dip_rr:
+    description: "左侧低吸（高赔率）：靠近 MA50 的试错窗口，止损近、上方空间大；只做 bull/neutral，默认用于“试错小仓”候选榜。"
+    factor_weights:
+      reward_risk: 0.35
+      pullback: 0.25
+      rsi: 0.15
+      regime: 0.15
+      atr: 0.10
+    factor_params:
+      # 周线用 MA50 当支撑，更贴近“左侧低吸”的定义
+      pullback:
+        ma_period: 50
+        max_pullback_pct: 0.22
+        min_prior_gain: 0.18
+      reward_risk:
+        support_ma_period: 50
+        lookback_high: 52
+        rr_good: 2.5
+        rr_excellent: 4.0
+        max_dist_support_pct: 0.10
+    entry_threshold: 0.72
+    exit_threshold: 0.45
+    require_factors: ["reward_risk", "pullback"]
+    exclude_factors: ["fomo"]
+    allowed_regimes: ["bull", "neutral"]
+
+  trend_pullback_weekly:
+    description: "趋势回踩低吸（1~数周波段）：右侧趋势确认后，等待回踩到均线支撑再介入；默认用于替代‘追涨/追突破’偏好。"
+    factor_weights:
+      pullback: 0.35
+      regime: 0.30
+      atr: 0.15
+      ma_cross: 0.10
+      macd: 0.10
+    factor_params:
+      pullback:
+        ma_period: 10
+        max_pullback_pct: 0.12
+        min_prior_gain: 0.12
+    entry_threshold: 0.72
+    exit_threshold: 0.45
+    require_factors: ["pullback"]
+    exclude_factors: ["fomo"]
+    allowed_regimes: ["bull", "neutral"]
+
+  trend_pullback_weekly_stable:
+    description: "趋势回踩低吸（更稳/更少误报）：更严格回踩窗口 + 更强波动惩罚；默认只做 bull 环境。"
+    factor_weights:
+      pullback: 0.30
+      regime: 0.30
+      atr: 0.25
+      ma_cross: 0.10
+      macd: 0.05
+    factor_params:
+      pullback:
+        ma_period: 10
+        max_pullback_pct: 0.10
+        min_prior_gain: 0.15
+    entry_threshold: 0.78
+    exit_threshold: 0.50
+    require_factors: ["pullback", "regime"]
+    exclude_factors: ["fomo"]
+    allowed_regimes: ["bull"]

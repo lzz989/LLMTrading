@@ -3,10 +3,22 @@
 .matplotlib/
 .pip_cache/
 .python_packages/
+.beads/
 outputs/
 data/
 references/
+.cache/
 __pycache__/
 *.pyc
 .DS_Store
 .env
+
+# local coverage artifacts
+.coverage
+coverage.xml
+htmlcov/
+
+# local tools / vendored scratch dirs (do not version)
+clawdbot-main/
+codex_skills/
+/bd
