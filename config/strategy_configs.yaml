@@ -39,7 +39,7 @@ strategies:
     allowed_regimes: ["bull", "neutral"]
 
   left_dip_rr:
-    description: "左侧低吸（高赔率）：靠近 MA50 的试错窗口，止损近、上方空间大；只做 bull/neutral，默认用于“试错小仓”候选榜。"
+    description: "左侧低吸（高赔率）：靠近结构支撑/MA20 的试错窗口，止损近、上方空间大；只做 bull/neutral，默认用于“试错小仓”候选榜。"
     factor_weights:
       reward_risk: 0.35
       pullback: 0.25
@@ -47,13 +47,16 @@ strategies:
       regime: 0.15
       atr: 0.10
     factor_params:
-      # 周线用 MA50 当支撑，更贴近“左侧低吸”的定义
+      # 周线结构支撑：swing_low/箱体下沿/MA20 取更保守
       pullback:
         ma_period: 50
         max_pullback_pct: 0.22
         min_prior_gain: 0.18
       reward_risk:
-        support_ma_period: 50
+        support_ma_period: 20
+        swing_lookback: 20
+        box_lookback: 26
+        donchian_lookback: 20
         lookback_high: 52
         rr_good: 2.5
         rr_excellent: 4.0

@@ -115,6 +115,12 @@ def cmd_data_doctor(args: argparse.Namespace) -> int:
     return _cmd(args)
 
 
+def cmd_verify_prices(args: argparse.Namespace) -> int:
+    from .commands.verify_prices import cmd_verify_prices as _cmd
+
+    return _cmd(args)
+
+
 def cmd_factor_research(args: argparse.Namespace) -> int:
     from .commands.factor_research import cmd_factor_research as _cmd
 
@@ -181,5 +187,17 @@ def cmd_skill(args: argparse.Namespace) -> int:
 
 def cmd_chat(args: argparse.Namespace) -> int:
     from .commands.chat import cmd_chat as _cmd
+
+    return _cmd(args)
+
+
+def cmd_daily_brief(args: argparse.Namespace) -> int:
+    from .commands.brief import cmd_daily_brief as _cmd
+
+    return _cmd(args)
+
+
+def cmd_commodity_chain(args: argparse.Namespace) -> int:
+    from .commands.commodity_chain import cmd_commodity_chain as _cmd
 
     return _cmd(args)

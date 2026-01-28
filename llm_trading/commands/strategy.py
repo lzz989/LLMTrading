@@ -11,6 +11,7 @@ from ..akshare_source import FetchParams
 from ..data_cache import fetch_daily_cached
 from ..json_utils import sanitize_for_json
 from ..pipeline import write_json
+from ..price_utils import calc_pct_chg, extract_close_pair, select_price_df
 from ..resample import resample_to_weekly
 from ..strategy_config_loader import load_strategy_configs_yaml
 
@@ -48,16 +49,6 @@ def _ensure_ohlcv(df):
         except (AttributeError):  # noqa: BLE001
             pass
     return df2
-
-
-def _pct_chg(close: list[float]) -> float | None:
-    if len(close) < 2:
-        return None
-    c0 = close[-2]
-    c1 = close[-1]
-    if c0 <= 0 or (not math.isfinite(c0)) or (not math.isfinite(c1)):
-        return None
-    return float((c1 / c0) - 1.0)
 
 
 def cmd_scan_strategy(args: argparse.Namespace) -> int:
@@ -291,6 +282,16 @@ def cmd_scan_strategy(args: argparse.Namespace) -> int:
         except (TypeError, ValueError, AttributeError):  # noqa: BLE001
             df_d2 = df_d
 
+        df_price_raw = None
+        try:
+            df_price_raw = fetch_daily_cached(
+                FetchParams(asset=asset, symbol=str(sym), adjust="", source=source),
+                cache_dir=cache_dir,
+                ttl_hours=cache_ttl_hours,
+            )
+        except Exception:  # noqa: BLE001
+            df_price_raw = None
+
         df_use = df_d2
         if freq == "weekly":
             try:
@@ -304,11 +305,26 @@ def cmd_scan_strategy(args: argparse.Namespace) -> int:
 
         try:
             close_ser = pd.to_numeric(df_use["close"], errors="coerce").astype(float)
-            close_last = _fnum(close_ser.iloc[-1])
-            close_vals = close_ser.tail(2).tolist()
+            close_last_sig = _fnum(close_ser.iloc[-1])
         except (TypeError, ValueError, OverflowError, KeyError, IndexError, AttributeError):  # noqa: BLE001
-            close_last = None
-            close_vals = []
+            close_last_sig = None
+
+        df_price, price_basis, price_basis_warning = select_price_df(df_price_raw, df_d2, asset=str(asset))
+        prev_close_price, close_last_price, price_as_of = extract_close_pair(df_price)
+        pct_chg = calc_pct_chg(prev_close_price, close_last_price)
+        close_last = close_last_price if close_last_price is not None else close_last_sig
+
+        data_source = None
+        data_source_warning = None
+        intraday_unclosed = None
+        try:
+            attrs = getattr(df_price, "attrs", {}) or {}
+            if isinstance(attrs, dict):
+                data_source = attrs.get("data_source")
+                data_source_warning = attrs.get("data_source_warning") or attrs.get("data_source_auto_fallback_error")
+                intraday_unclosed = attrs.get("intraday_unclosed")
+        except (AttributeError, TypeError, ValueError):  # noqa: BLE001
+            data_source = None
 
         try:
             amt_last = None
@@ -369,6 +385,17 @@ def cmd_scan_strategy(args: argparse.Namespace) -> int:
             else:
                 action = "watch"
 
+        risk_flags: list[str] = []
+        if action == "entry":
+            if str(price_basis) != "raw":
+                risk_flags.append("price_basis_not_raw")
+            if str(source) in {"auto", "tushare"} and str(data_source) == "akshare":
+                risk_flags.append("data_source_fallback_akshare")
+            if bool(intraday_unclosed):
+                risk_flags.append("intraday_unclosed")
+            if risk_flags:
+                action = "watch"
+
         item = {
             "asset": str(asset),
             "symbol": str(sym),
@@ -380,7 +407,14 @@ def cmd_scan_strategy(args: argparse.Namespace) -> int:
             "entry": {"price_ref": close_last, "price_ref_type": "close", "notes": reason},
             "meta": {
                 "close": close_last,
-                "pct_chg": _pct_chg([float(x) for x in close_vals if x is not None]) if close_vals else None,
+                "pct_chg": pct_chg,
+                "pct_chg_freq": "daily",
+                "price_basis": price_basis,
+                "price_basis_warning": price_basis_warning,
+                "data_source": data_source,
+                "data_source_warning": data_source_warning,
+                "intraday_unclosed": intraday_unclosed,
+                "risk_flags": risk_flags if risk_flags else None,
                 "amount": amt_last,
                 "liquidity": {
                     "amount_last": amt_last,
@@ -389,10 +423,43 @@ def cmd_scan_strategy(args: argparse.Namespace) -> int:
                     "volume_avg20": vol_avg20,
                 },
                 "strategy_signal": sig,
-                "as_of": as_of,
+                "as_of": price_as_of or as_of,
+                "signal_as_of": as_of,
+                "signal_freq": freq,
             },
             "tags": ["strategy_config", str(strategy_key)],
         }
+
+        # 左侧高赔率：把结构支撑失效条件写进 signals item
+        if str(strategy_key) == "left_dip_rr":
+            try:
+                factors = sig.get("factors") if isinstance(sig, dict) else {}
+                rr = factors.get("reward_risk") if isinstance(factors, dict) else {}
+                details = rr.get("details") if isinstance(rr, dict) else {}
+                support = _fnum(details.get("support")) if isinstance(details, dict) else None
+                target = _fnum(details.get("target")) if isinstance(details, dict) else None
+                support_kind = details.get("support_kind") if isinstance(details, dict) else None
+                target_kind = details.get("target_kind") if isinstance(details, dict) else None
+                if support is not None:
+                    item["invalidation"] = {
+                        "rule": "close_below_level",
+                        "level": float(support),
+                        "note": f"左侧低吸：收盘跌破{support_kind or '结构'}支撑视为失效",
+                    }
+                    meta = item.get("meta") if isinstance(item.get("meta"), dict) else {}
+                    levels = meta.get("levels") if isinstance(meta.get("levels"), dict) else {}
+                    levels.setdefault("support_struct", float(support))
+                    if target is not None:
+                        levels.setdefault("resistance_struct", float(target))
+                    meta["levels"] = levels
+                    if support_kind or target_kind:
+                        meta["reward_risk_struct"] = {
+                            "support_kind": support_kind,
+                            "target_kind": target_kind,
+                        }
+                    item["meta"] = meta
+            except Exception:  # noqa: BLE001
+                pass
         return sanitize_for_json(item)
 
     items: list[dict[str, Any]] = []

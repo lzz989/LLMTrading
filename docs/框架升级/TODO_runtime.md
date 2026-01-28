@@ -20,6 +20,7 @@
 - [x] `run` 的多资产编排（etf + stock 可选：`--scan-stock`）
 - [x] “持仓深度复盘”一键化：`run --deep-holdings` 逐标的跑 `analyze --method all` 并聚合 `report_holdings.md`
 - [x] 风控解释更直观：当 `orders_next_open=0` 时，report 里输出 blockers 摘要（exposure/min_trade_notional 等）
+- [x] 双榜输出（右侧趋势 + 左侧高赔率）：`--scan-left` 默认启用，产物 `signals_left.json`/`signals_left_stock.json`
 
 ## 你要怎么用（最少动作）
 
@@ -32,6 +33,14 @@
 验收：打开 `outputs/run_YYYYMMDD/report.md`，能看到：
 - alerts（持仓风险清单）
 - signals_top（ETF 候选Top）
+- signals_top_left（左侧高赔率候选Top）
 - signals_top_stock（若开启 `--scan-stock`）
+- signals_top_left_stock（若开启 `--scan-stock` 且 `--scan-left`）
 - position_plan（目标仓位/止损口径）
 - orders_next_open（若为空，看 warnings）
+
+产物补充（双榜相关）：
+- `signals_left.json`（ETFs 左侧高赔率候选）
+- `signals_left_stock.json`（stocks 左侧高赔率候选，需 `--scan-stock`）
+- `scan_strategy_left/`（左侧 scan-strategy 原始目录）
+- `scan_strategy_stock_left/`（stock 左侧 scan-strategy 原始目录）

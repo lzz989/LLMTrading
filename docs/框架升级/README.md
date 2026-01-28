@@ -26,6 +26,7 @@
 | [05_roadmap.md](./05_roadmap.md) | 🗺️ 实施路线图 | 规划 |
 | [06_risks.md](./06_risks.md) | ⚠️ 风险提示和应对 | 必读 |
 | [07_appendix.md](./07_appendix.md) | 📎 附录（配置模板、SQL示例等） | 参考 |
+| [08_productization_club_style.md](./08_productization_club_style.md) | 🧩 产品化结构对标（俱乐部广告可学点） | P2 |
 
 ---
 
@@ -76,6 +77,34 @@ cat 02_factor_architecture.md
 cat 05_roadmap.md
 ```
 了解各阶段的里程碑和交付物。
+
+---
+
+## 🧪 双榜模式（右侧趋势 + 左侧高赔率）
+
+默认 `run` 会同时产出：
+- 右侧趋势候选榜（signals_top）
+- 左侧高赔率候选榜（signals_top_left）
+
+一键命令（默认已启用左侧榜）：
+```bash
+".venv/bin/python" -m llm_trading run --out-dir "outputs/run_YYYYMMDD"
+```
+
+可选参数（与 CLI 一致）：
+- `--scan-left/--no-scan-left`：开关左侧高赔率榜
+- `--scan-left-strategy left_dip_rr`：左侧榜策略 key（默认 `left_dip_rr`）
+- `--scan-left-top-k 30`：左侧榜 TopK
+- `--scan-stock`：额外产出股票候选榜 + 左侧股票榜
+
+验收点（report.md）：
+- `signals_top` / `signals_top_left`
+- `signals_top_stock` / `signals_top_left_stock`（仅 `--scan-stock`）
+
+主要产物：
+- `signals.json`（右侧趋势候选）
+- `signals_left.json`（左侧高赔率候选）
+- `signals_stock.json` / `signals_left_stock.json`（仅 `--scan-stock`）
 
 ---
 

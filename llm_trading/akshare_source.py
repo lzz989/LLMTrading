@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
@@ -10,6 +11,29 @@ from .utils_time import as_yyyymmdd, parse_date_any
 
 _LOG = get_logger(__name__)
 _AUTO_FALLBACK_WARNED: set[str] = set()
+
+
+def resolve_price_source(src: str | None, *, asset: str | None = None) -> str:
+    """
+    统一数据源入口：优先使用显式 source，其次读取环境变量（按资产优先于全局）。
+    允许值：akshare / tushare / auto；其他值一律回退到 akshare。
+    """
+    s = str(src or "").strip().lower()
+    if not s:
+        try:
+            from .config import load_config
+
+            load_config()
+        except Exception:  # noqa: BLE001
+            pass
+        a = str(asset or "").strip().upper()
+        if a:
+            s = os.getenv(f"LLM_TRADING_PRICE_SOURCE_{a}", "").strip().lower()
+        if not s:
+            s = os.getenv("LLM_TRADING_PRICE_SOURCE", "").strip().lower()
+    if s not in {"akshare", "tushare", "auto"}:
+        s = "akshare"
+    return s
 
 
 def _warn_auto_fallback_once(*, asset: str, symbol: str, err: str) -> None:
@@ -274,10 +298,8 @@ def resolve_symbol(asset: AssetType, symbol: str) -> str:
 def fetch_daily(params: FetchParams):
     asset = params.asset
     symbol = resolve_symbol(asset, params.symbol)
-    # 默认走 AkShare（免费+ETF支持复权）。需要对齐券商/行情软件口径时，可显式传 source=auto/tushare。
-    src = str(params.source or "").strip().lower() or "akshare"
-    if src not in {"akshare", "tushare", "auto"}:
-        src = "akshare"
+    # 默认走 AkShare（免费+ETF支持复权）。如配置 LLM_TRADING_PRICE_SOURCE 或显式传 source，可切换。
+    src = resolve_price_source(params.source, asset=str(asset))
 
     if asset == "etf":
         df = None

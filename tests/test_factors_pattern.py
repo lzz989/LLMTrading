@@ -142,24 +142,38 @@ class TestFactorsPattern(unittest.TestCase):
         self.assertIn("看跌吞没", out2.details.get("patterns") or [])
         self.assertEqual(out2.direction, "bearish")
 
-    def test_reward_risk_factor_prefers_high_rr_near_support(self) -> None:
+    def test_reward_risk_factor_struct_support_target(self) -> None:
         from llm_trading.factors.pattern import RewardRiskFactor
 
-        # 构造：近期有一个高点(20)，当前价贴近 MA50(≈10)，赔率应很高
-        df = _make_base_df(60, close0=10.0, step=0.0)
-        df.loc[df.index[8], ["open", "high", "low", "close"]] = 20.0  # 在 lookback_high=52 内，但不进 MA50 的窗口
-        df.loc[df.index[-1], ["open", "high", "low", "close"]] = 10.05  # 贴近支撑，风险小
+        # 构造：支撑=MA(5) 更保守；目标=Donchian 上轨（最近5根高点）
+        df = _make_base_df(12, close0=10.0, step=0.0)
+        # box_low（更低的箱体下沿）
+        df.loc[df.index[1], "low"] = 8.0
+        # swing_low（最近5根的低点）
+        df.loc[df.index[9], "low"] = 9.0
+        # prior_high（更高的前高）
+        df.loc[df.index[2], "high"] = 14.0
+        # box_high（更高的箱体上沿）
+        df.loc[df.index[3], "high"] = 15.0
+        # donchian_upper（最近5根高点）
+        df.loc[df.index[8], "high"] = 13.0
+        # 当前价略高
+        df.loc[df.index[-1], ["open", "high", "low", "close"]] = 10.2
 
-        out = RewardRiskFactor().compute(df)
-        self.assertGreater(float(out.score), 0.8)
-        self.assertIn(out.direction, {"bullish", "neutral"})  # score+rr 足够高时通常 bullish
-        self.assertIsInstance(out.details.get("rr"), float)
+        out = RewardRiskFactor(
+            support_ma_period=5,
+            swing_lookback=5,
+            box_lookback=10,
+            donchian_lookback=5,
+            lookback_high=10,
+        ).compute(df)
+        details = out.details
 
-        # 离支撑太远：应触发“追涨假装低吸”的惩罚
-        df2 = df.copy()
-        df2.loc[df2.index[-1], ["open", "high", "low", "close"]] = 12.0  # dist_to_support_pct≈20% > 10%
-        out2 = RewardRiskFactor().compute(df2)
-        self.assertLess(float(out2.score), 0.2)
+        self.assertEqual(details.get("support_kind"), "ma")
+        self.assertEqual(details.get("target_kind"), "donchian_upper")
+        self.assertGreater(float(details.get("support") or 0.0), 9.5)
+        self.assertAlmostEqual(float(details.get("target") or 0.0), 13.0, places=6)
+        self.assertGreater(float(details.get("rr") or 0.0), 5.0)
 
 
 if __name__ == "__main__":

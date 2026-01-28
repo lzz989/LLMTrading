@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import os
 import sys
 import time
@@ -50,11 +51,41 @@ from .common import (
     _write_run_meta,
 )
 
+def _safe_score01(x: object) -> float | None:
+    try:
+        v = float(x)
+    except (TypeError, ValueError, OverflowError):  # noqa: BLE001
+        return None
+    if v != v:  # NaN
+        return None
+    v = max(0.0, min(float(v), 1.0))
+    return float(v)
+
+
+def _fund_flow_score_from_meta(meta: dict[str, object] | None) -> float | None:
+    if not isinstance(meta, dict):
+        return None
+    ff = meta.get("fund_flow")
+    if not isinstance(ff, dict):
+        return None
+    return _safe_score01(ff.get("score01"))
+
+
+def _fund_flow_decision_for_score(score01: float | None, block_score: float, warn_score: float) -> str:
+    if score01 is None:
+        return "skip"
+    if float(score01) < float(block_score):
+        return "block"
+    if float(score01) < float(warn_score):
+        return "warn"
+    return "pass"
+
 def cmd_plan_etf(args: argparse.Namespace) -> int:
     """
     仓位计划（ETF）：把 scan-etf 的 top_bbb.json 变成“明天买多少 + 止损线”。
     """
     import json
+    import math
 
     scan_dir = Path(str(getattr(args, "scan_dir", "") or "").strip()) if getattr(args, "scan_dir", None) else None
     input_path = Path(str(getattr(args, "input", "") or "").strip()) if getattr(args, "input", None) else None
@@ -487,6 +518,32 @@ def cmd_rebalance_user(args: argparse.Namespace) -> int:
     # Phase2：CashSignal 风控开关（默认关闭：只降不升地限制 max_exposure_pct）
     use_cash_signal = bool(getattr(args, "cash_signal", False))
 
+    # 核心+卫星组合（ETF + stock）：默认开启（仅在 stock 候选存在时生效）
+    core_satellite_enabled = bool(getattr(args, "core_satellite", True))
+
+    # 国家队 proxy 风控（默认启用；仅在提供 national_team.json 时生效）
+    nt_guard_enabled = bool(getattr(args, "national_team_guard", True))
+    nt_guard_warnings: list[str] = []
+    nt_guard_info: dict[str, Any] | None = None
+
+    # 主力资金复核（默认启用；仅影响 stock 买入；只降不升）
+    fund_flow_check = bool(getattr(args, "fund_flow_check", True))
+    fund_flow_mode = str(getattr(args, "fund_flow_check_mode", "auto") or "auto").strip().lower()
+    if fund_flow_mode not in {"auto", "meta_only"}:
+        fund_flow_mode = "auto"
+    try:
+        fund_flow_block_score = float(getattr(args, "fund_flow_block_score", 0.45) or 0.45)
+    except (TypeError, ValueError, OverflowError):  # noqa: BLE001
+        fund_flow_block_score = 0.45
+    try:
+        fund_flow_warn_score = float(getattr(args, "fund_flow_warn_score", 0.55) or 0.55)
+    except (TypeError, ValueError, OverflowError):  # noqa: BLE001
+        fund_flow_warn_score = 0.55
+    fund_flow_block_score = max(0.0, min(float(fund_flow_block_score), 1.0))
+    fund_flow_warn_score = max(0.0, min(float(fund_flow_warn_score), 1.0))
+    if fund_flow_warn_score < fund_flow_block_score:
+        fund_flow_warn_score = float(fund_flow_block_score)
+
     # 组合层约束：优先 CLI；否则读 user_holdings.json 的 trade_rules
     max_positions_eff = None
     raw_mp = getattr(args, "max_positions", None)
@@ -697,7 +754,8 @@ def cmd_rebalance_user(args: argparse.Namespace) -> int:
         for s in items0:
             if not isinstance(s, dict):
                 continue
-            if str(s.get("asset") or "").strip().lower() != "etf":
+            asset = str(s.get("asset") or "").strip().lower()
+            if asset not in {"etf", "stock"}:
                 continue
             act = str(s.get("action") or "").strip().lower()
             # 组合层只吃 entry（别拿 watch/avoid/exit 去凑仓位）
@@ -707,6 +765,7 @@ def cmd_rebalance_user(args: argparse.Namespace) -> int:
             entry = s.get("entry") if isinstance(s.get("entry"), dict) else {}
             sig_items.append(
                 {
+                    "asset": asset,
                     "symbol": s.get("symbol"),
                     "name": s.get("name"),
                     "close": (meta.get("close") if isinstance(meta, dict) else None) or entry.get("price_ref"),
@@ -714,6 +773,10 @@ def cmd_rebalance_user(args: argparse.Namespace) -> int:
                     "exit": meta.get("exit") if isinstance(meta, dict) else None,
                     "bbb": meta.get("bbb") if isinstance(meta, dict) else None,
                     "bbb_forward": meta.get("bbb_forward") if isinstance(meta, dict) else None,
+                    "score": s.get("score"),
+                    "confidence": s.get("confidence"),
+                    "tags": s.get("tags") if isinstance(s.get("tags"), list) else None,
+                    "meta": meta,
                 }
             )
     else:
@@ -721,12 +784,27 @@ def cmd_rebalance_user(args: argparse.Namespace) -> int:
         sig_items = items0 if isinstance(items0, list) else []
         cfg0 = raw_sig.get("bbb") if isinstance(raw_sig, dict) else None
         bbb_cfg = cfg0 if isinstance(cfg0, dict) else {}
+        # 兼容旧口径：补 asset/score（避免后续排序/过滤时缺字段）
+        fixed: list[dict[str, Any]] = []
+        for it in sig_items:
+            if not isinstance(it, dict):
+                continue
+            it2 = dict(it)
+            it2.setdefault("asset", "etf")
+            if it2.get("score") is None:
+                bbb2 = it2.get("bbb") if isinstance(it2.get("bbb"), dict) else {}
+                it2["score"] = bbb2.get("score")
+            fixed.append(it2)
+        sig_items = fixed
 
     # 非 BBB 信号（尤其 scan-strategy）通常不会带 levels/exit；
     # 但仓位计划需要它们来算 stop（entry_ma / MA20 / ATR）。这里补一份“最小可用口径”，让组合层能跑通。
     try:
         cache_ttl_hours_lv = float(getattr(args, "cache_ttl_hours", 6.0) or 6.0)
-        cache_dir_etf = Path("data") / "cache" / "etf"
+        cache_dir_map = {
+            "etf": Path("data") / "cache" / "etf",
+            "stock": Path("data") / "cache" / "stock",
+        }
 
         def _fnum(x) -> float | None:
             try:
@@ -745,6 +823,9 @@ def cmd_rebalance_user(args: argparse.Namespace) -> int:
             sym = str(it.get("symbol") or "").strip()
             if not sym:
                 continue
+            asset = str(it.get("asset") or "etf").strip().lower() or "etf"
+            if asset not in {"etf", "stock"}:
+                continue
 
             lv = it.get("levels") if isinstance(it.get("levels"), dict) else {}
             ex = it.get("exit") if isinstance(it.get("exit"), dict) else {}
@@ -757,13 +838,13 @@ def cmd_rebalance_user(args: argparse.Namespace) -> int:
                 continue
 
             try:
-                sym2 = resolve_symbol("etf", sym)
+                sym2 = resolve_symbol(asset, sym)
             except Exception:  # noqa: BLE001
                 sym2 = sym
 
             df_d = fetch_daily_cached(
-                FetchParams(asset="etf", symbol=str(sym2), adjust="qfq"),
-                cache_dir=cache_dir_etf,
+                FetchParams(asset=str(asset), symbol=str(sym2), adjust=(stock_adjust if asset == "stock" else "qfq")),
+                cache_dir=cache_dir_map.get(asset, Path("data") / "cache" / str(asset)),
                 ttl_hours=float(cache_ttl_hours_lv),
             )
             if df_d is None or getattr(df_d, "empty", True):
@@ -848,7 +929,10 @@ def cmd_rebalance_user(args: argparse.Namespace) -> int:
     if min_score > 0:
         kept: list[dict[str, Any]] = []
         cache_ttl_hours2 = float(getattr(args, "cache_ttl_hours", 6.0) or 6.0)
-        cache_dir2 = Path("data") / "cache" / "etf"
+        cache_dir_map2 = {
+            "etf": Path("data") / "cache" / "etf",
+            "stock": Path("data") / "cache" / "stock",
+        }
 
         for it in sig_items:
             if not isinstance(it, dict):
@@ -856,13 +940,16 @@ def cmd_rebalance_user(args: argparse.Namespace) -> int:
             sym = str(it.get("symbol") or "").strip()
             if not sym:
                 continue
+            asset = str(it.get("asset") or "etf").strip().lower() or "etf"
+            if asset not in {"etf", "stock"}:
+                continue
 
             sc = None
             try:
                 # 取日线 -> 转周线（BBB/仓位计划口径以周线为主）
                 df_d = fetch_daily_cached(
-                    FetchParams(asset="etf", symbol=resolve_symbol("etf", sym), adjust="qfq"),
-                    cache_dir=cache_dir2,
+                    FetchParams(asset=asset, symbol=resolve_symbol(asset, sym), adjust=(stock_adjust if asset == "stock" else "qfq")),
+                    cache_dir=cache_dir_map2.get(asset, Path("data") / "cache" / asset),
                     ttl_hours=float(cache_ttl_hours2),
                 )
                 if df_d is None or getattr(df_d, "empty", True):
@@ -916,7 +1003,7 @@ def cmd_rebalance_user(args: argparse.Namespace) -> int:
                     df=dfw,
                     inputs=OpportunityScoreInputs(
                         symbol=str(sym),
-                        asset="etf",
+                        asset=str(asset),
                         as_of=as_of_d,
                         ref_date=as_of_d,
                         min_score=0.70,
@@ -943,6 +1030,60 @@ def cmd_rebalance_user(args: argparse.Namespace) -> int:
                 filtered_by_min_score_sig += 1
 
         sig_items = kept
+
+    # 核心+卫星（ETF=核心，stock=卫星；仅在 stock 候选存在时启用）
+    sig_has_stock = any(str(it.get("asset") or "").strip().lower() == "stock" for it in sig_items if isinstance(it, dict))
+    sig_has_etf = any(str(it.get("asset") or "").strip().lower() == "etf" for it in sig_items if isinstance(it, dict))
+    core_satellite_active = bool(core_satellite_enabled and sig_has_stock)
+    core_satellite_summary: dict[str, Any] | None = None
+    if core_satellite_active:
+        prof0 = risk_profile_for_regime(regime_label)
+        if max_positions_eff is None:
+            # 在原“牛熊默认”上 +1，封顶 3（bull/neutral:2->3；bear:1->2）
+            try:
+                max_positions_eff = int(min(3, max(1, int(prof0.max_positions) + 1)))
+            except (TypeError, ValueError, OverflowError, AttributeError):  # noqa: BLE001
+                max_positions_eff = 2
+        if max_position_pct_eff is None:
+            max_position_pct_eff = 0.40
+
+        def _fnum(x) -> float:
+            try:
+                v = float(x) if x is not None else 0.0
+            except (TypeError, ValueError, OverflowError, AttributeError):  # noqa: BLE001
+                return 0.0
+            return float(v) if math.isfinite(v) else 0.0
+
+        def _rank_key(it: dict[str, Any], idx: int) -> tuple:
+            return (-_fnum(it.get("score")), -_fnum(it.get("confidence")), idx)
+
+        etf_items = [it for it in sig_items if isinstance(it, dict) and str(it.get("asset") or "").strip().lower() == "etf"]
+        stock_items = [it for it in sig_items if isinstance(it, dict) and str(it.get("asset") or "").strip().lower() == "stock"]
+
+        etf_sorted = [it for _, it in sorted(list(enumerate(etf_items)), key=lambda kv: _rank_key(kv[1], kv[0]))]
+        stock_sorted = [it for _, it in sorted(list(enumerate(stock_items)), key=lambda kv: _rank_key(kv[1], kv[0]))]
+
+        core = etf_sorted[:1] if etf_sorted else []
+        slots_total = int(max_positions_eff or 0)
+        if slots_total <= 0:
+            slots_total = max(1, int(len(core) + len(stock_sorted)))
+        slots_left = max(0, int(slots_total) - int(len(core)))
+        satellites = stock_sorted[: int(slots_left)] if stock_sorted else []
+
+        # 没有 stock（理论上不会触发），兜底：只留 ETF 前 N
+        if not stock_sorted and etf_sorted:
+            core = etf_sorted[: int(slots_total)]
+            satellites = []
+
+        sig_items = core + satellites
+        core_satellite_summary = {
+            "enabled": True,
+            "slots_total": int(slots_total),
+            "core_etf": [str(it.get("symbol") or "").strip() for it in core],
+            "satellite_stock": [str(it.get("symbol") or "").strip() for it in satellites],
+            "has_etf": bool(sig_has_etf),
+            "has_stock": bool(sig_has_stock),
+        }
 
     rt_default = float((bbb_cfg or {}).get("roundtrip_cost_yuan") or 10.0)
     rt = float(getattr(args, "roundtrip_cost_yuan", None) or rt_default)
@@ -989,7 +1130,6 @@ def cmd_rebalance_user(args: argparse.Namespace) -> int:
         if idx_first and idx_first.lower() not in {"off", "none", "0"}:
             vol_index_symbol = idx_first
             try:
-                import math
                 import pandas as pd
 
                 df_idx = fetch_daily_cached(
@@ -1041,6 +1181,90 @@ def cmd_rebalance_user(args: argparse.Namespace) -> int:
         else:
             max_exposure_eff = float(min(float(max_exposure_eff), float(cash_exposure_cap_pct_eff)))
 
+    # 国家队 proxy：对“结构信号”加一层风险过滤（只降不升）
+    nt_path_raw = getattr(args, "national_team_path", None)
+    nt_min_score = float(getattr(args, "national_team_min_score", 0.40) or 0.40)
+    nt_warn_score = float(getattr(args, "national_team_warn_score", 0.55) or 0.55)
+    nt_scale_low = float(getattr(args, "national_team_scale_low", 0.35) or 0.35)
+    nt_scale_mid = float(getattr(args, "national_team_scale_mid", 0.70) or 0.70)
+    nt_max_pos_low = int(getattr(args, "national_team_max_positions_low", 1) or 1)
+
+    if bool(nt_guard_enabled) and nt_path_raw:
+        p_nt = Path(str(nt_path_raw))
+        if p_nt.exists():
+            try:
+                nt_obj = json.loads(p_nt.read_text(encoding="utf-8"))
+            except (AttributeError, TypeError, ValueError) as exc:  # noqa: BLE001
+                nt_obj = None
+                nt_guard_warnings.append(f"national_team.json 解析失败：{exc}")
+
+            comp = None
+            try:
+                if isinstance(nt_obj, dict):
+                    sc = nt_obj.get("score") if isinstance(nt_obj.get("score"), dict) else {}
+                    comp = sc.get("composite01") if isinstance(sc, dict) else None
+                comp = float(comp) if comp is not None else None
+            except (TypeError, ValueError, OverflowError, AttributeError):  # noqa: BLE001
+                comp = None
+
+            tier = "missing"
+            scale = None
+            cap = None
+            max_pos_cap = None
+            if comp is not None:
+                if comp < nt_min_score:
+                    tier = "risk_off"
+                    scale = float(nt_scale_low)
+                    max_pos_cap = int(nt_max_pos_low) if nt_max_pos_low > 0 else None
+                elif comp < nt_warn_score:
+                    tier = "caution"
+                    scale = float(nt_scale_mid)
+                else:
+                    tier = "support"
+                    scale = 1.0
+
+                if scale is not None and scale < 1.0:
+                    base_me = None
+                    if max_exposure_eff is not None:
+                        base_me = float(max_exposure_eff)
+                    elif getattr(args, "max_exposure_pct", None) is not None:
+                        try:
+                            base_me = float(getattr(args, "max_exposure_pct"))
+                        except (TypeError, ValueError, OverflowError):  # noqa: BLE001
+                            base_me = None
+                    if base_me is None:
+                        base_me = float(risk_profile_for_regime(regime_label).max_exposure_pct)
+
+                    base_me = max(0.0, min(float(base_me), 1.0))
+                    cap = float(base_me) * float(scale)
+                    if max_exposure_eff is None:
+                        max_exposure_eff = float(cap)
+                    else:
+                        max_exposure_eff = float(min(float(max_exposure_eff), float(cap)))
+
+                if tier == "risk_off" and max_pos_cap is not None:
+                    if max_positions_eff is None:
+                        max_positions_eff = int(max_pos_cap)
+                    else:
+                        max_positions_eff = int(min(int(max_positions_eff), int(max_pos_cap)))
+
+            nt_guard_info = {
+                "enabled": True,
+                "path": str(p_nt),
+                "composite01": comp,
+                "tier": tier,
+                "scale": scale,
+                "max_exposure_cap_pct": cap,
+                "max_positions_cap": max_pos_cap,
+                "thresholds": {"min_score": float(nt_min_score), "warn_score": float(nt_warn_score)},
+            }
+            if comp is None:
+                nt_guard_warnings.append("national_team_guard: composite01 缺失（不做风控缩放）")
+        else:
+            nt_guard_warnings.append(f"national_team.json 不存在：{p_nt}")
+    elif bool(nt_guard_enabled):
+        nt_guard_warnings.append("national_team_guard 已启用但未提供 --national-team-path（本次不生效）")
+
     # max_corr：别名覆盖 diversify_max_corr（兼容旧参数，减少你记命令的心智负担）
     max_corr_override = getattr(args, "max_corr", None)
     div_max_corr = float(getattr(args, "diversify_max_corr", 0.95) or 0.95)
@@ -1087,6 +1311,22 @@ def cmd_rebalance_user(args: argparse.Namespace) -> int:
         warnings.append(f"OpportunityScore 过滤：min_score={min_score:g}，剔除候选={int(filtered_by_min_score_sig)}")
     if min_score > 0 and (not sig_items):
         warnings.append(f"OpportunityScore 过滤后候选为空：min_score={min_score:g}（rotate 保护会阻止一键清仓）")
+    if nt_guard_warnings:
+        warnings.extend(nt_guard_warnings[:10])
+    if nt_guard_info:
+        comp = nt_guard_info.get("composite01")
+        tier = nt_guard_info.get("tier")
+        scale = nt_guard_info.get("scale")
+        cap = nt_guard_info.get("max_exposure_cap_pct")
+        warnings.append(
+            f"national_team_guard: tier={tier} comp={comp} scale={scale} max_exposure_cap={cap}"
+        )
+    if core_satellite_summary:
+        core_list = ",".join([s for s in (core_satellite_summary.get("core_etf") or []) if str(s).strip()]) or "无"
+        sat_list = ",".join([s for s in (core_satellite_summary.get("satellite_stock") or []) if str(s).strip()]) or "无"
+        warnings.append(
+            f"核心+卫星启用：slots_total={core_satellite_summary.get('slots_total')} core_etf={core_list} satellite_stock={sat_list}"
+        )
     if bool(use_cash_signal):
         if cash_exposure_cap_pct_eff is not None:
             crx = None
@@ -1099,6 +1339,231 @@ def cmd_rebalance_user(args: argparse.Namespace) -> int:
             warnings.append(f"CashSignal 计算失败（降级不影响主流程）：{cash_sig_error}")
         elif tushare_pack_error:
             warnings.append(f"TuShare 因子包失败（已降级）：{tushare_pack_error}")
+
+    # 主力资金复核：准备 meta 映射 + 评估器（只对 stock buy 生效；无数据不拦截）
+    fund_flow_meta_map: dict[str, dict[str, object]] = {}
+    fund_flow_cache: dict[str, dict[str, object]] = {}
+    fund_flow_warned: set[str] = set()
+    fund_flow_stats: dict[str, object] = {
+        "checked": 0,
+        "passed": 0,
+        "warned": 0,
+        "blocked": 0,
+        "skipped": 0,
+        "sources": {},
+    }
+
+    def _ff_norm_symbol(asset: str, sym: str) -> str:
+        s = str(sym or "").strip()
+        a = str(asset or "etf").strip().lower() or "etf"
+        if a == "stock" and s:
+            try:
+                s = resolve_symbol("stock", s)
+            except Exception:  # noqa: BLE001
+                pass
+        return s
+
+    def _ff_key(asset: str, sym: str) -> str:
+        a = str(asset or "etf").strip().lower() or "etf"
+        s = _ff_norm_symbol(a, sym)
+        return f"{a}:{s}"
+
+    for it in sig_items:
+        if not isinstance(it, dict):
+            continue
+        sym = str(it.get("symbol") or "").strip()
+        asset = str(it.get("asset") or "etf").strip().lower() or "etf"
+        if not sym:
+            continue
+        meta = it.get("meta") if isinstance(it.get("meta"), dict) else None
+        if meta is None:
+            continue
+        fund_flow_meta_map[_ff_key(asset, sym)] = meta
+
+    def _parse_date_any(s: object) -> datetime | None:
+        s2 = str(s or "").strip()
+        if not s2:
+            return None
+        if len(s2) >= 10:
+            try:
+                return datetime.strptime(s2[:10], "%Y-%m-%d")
+            except (TypeError, ValueError):  # noqa: BLE001
+                pass
+        if len(s2) >= 8 and s2[:8].isdigit():
+            try:
+                return datetime.strptime(s2[:8], "%Y%m%d")
+            except (TypeError, ValueError):  # noqa: BLE001
+                pass
+        return None
+
+    ff_asof = None
+    for cand in [
+        (market_regime or {}).get("last_date") if isinstance(market_regime, dict) else None,
+        (market_regime or {}).get("date") if isinstance(market_regime, dict) else None,
+        hold_out.get("as_of") if isinstance(hold_out, dict) else None,
+        raw_sig.get("as_of") if isinstance(raw_sig, dict) else None,
+        raw_sig.get("generated_at") if isinstance(raw_sig, dict) else None,
+    ]:
+        dt = _parse_date_any(cand)
+        if dt is not None:
+            ff_asof = dt.date()
+            break
+    if ff_asof is None:
+        ff_asof = datetime.now().date()
+
+    def _safe_float(x: object) -> float | None:
+        try:
+            v = float(x)
+        except (TypeError, ValueError, OverflowError):  # noqa: BLE001
+            return None
+        if v != v:  # NaN
+            return None
+        return float(v)
+
+    def _fund_flow_score_from_eastmoney(ff: dict[str, object]) -> float | None:
+        main_5 = _safe_float(ff.get("main_net_5d"))
+        main_20 = _safe_float(ff.get("main_net_20d"))
+        pct_5 = _safe_float(ff.get("main_pct_avg_5d"))
+        used = 0
+        score = 0.5
+        if main_5 is not None:
+            score += 0.12 if main_5 > 0 else -0.12
+            used += 1
+        if main_20 is not None:
+            score += 0.08 if main_20 > 0 else -0.08
+            used += 1
+        if pct_5 is not None:
+            score += 0.06 if pct_5 > 0 else -0.06
+            used += 1
+        if used <= 0:
+            return None
+        return _safe_score01(score)
+
+    def _fund_flow_info(sym: str, asset: str) -> dict[str, object]:
+        key = _ff_key(asset, sym)
+        if key in fund_flow_cache:
+            return fund_flow_cache[key]
+
+        sym_norm = _ff_norm_symbol(asset, sym)
+        info: dict[str, object] = {
+            "asset": str(asset),
+            "symbol": str(sym_norm),
+            "mode": str(fund_flow_mode),
+            "score01": None,
+            "source": None,
+            "as_of": str(ff_asof),
+        }
+
+        meta = fund_flow_meta_map.get(key)
+        score_meta = _fund_flow_score_from_meta(meta if isinstance(meta, dict) else None)
+        if score_meta is not None:
+            info["score01"] = float(score_meta)
+            info["source"] = "meta"
+            ffm = meta.get("fund_flow") if isinstance(meta, dict) else None
+            if isinstance(ffm, dict):
+                info["ref_date"] = ffm.get("ref_date")
+            fund_flow_cache[key] = info
+            return info
+
+        if str(fund_flow_mode) == "meta_only":
+            info["source"] = "meta_only"
+            fund_flow_cache[key] = info
+            return info
+
+        # auto：优先 TuShare microstructure；失败再试 Eastmoney 主力净流
+        if sym_norm:
+            try:
+                from ..tushare_factors import compute_stock_microstructure_tushare
+
+                micro = compute_stock_microstructure_tushare(
+                    as_of=ff_asof,
+                    symbol_prefixed=str(sym_norm),
+                    daily_amount_by_date=None,
+                    cache_dir=Path("data") / "cache" / "tushare_factors",
+                    ttl_hours=float(cache_ttl_hours),
+                    lookback_days=60,
+                )
+                if isinstance(micro, dict) and bool(micro.get("ok")):
+                    sc = _safe_score01(micro.get("score01"))
+                    if sc is not None:
+                        info["score01"] = float(sc)
+                        info["source"] = "tushare_micro"
+                        info["ref_date"] = micro.get("ref_date")
+                        info["note"] = micro.get("note")
+            except Exception as exc:  # noqa: BLE001
+                info["error"] = str(exc)
+
+            if info.get("score01") is None:
+                try:
+                    from ..institution import _try_fetch_stock_fund_flow
+
+                    ff = _try_fetch_stock_fund_flow(str(sym_norm))
+                    if isinstance(ff, dict):
+                        sc2 = _fund_flow_score_from_eastmoney(ff)
+                        if sc2 is not None:
+                            info["score01"] = float(sc2)
+                            info["source"] = "eastmoney"
+                            info["ref_date"] = ff.get("last_date")
+                            info["note"] = "eastmoney 主力净流(5D/20D)启发式评分"
+                except Exception as exc:  # noqa: BLE001
+                    if not info.get("error"):
+                        info["error"] = str(exc)
+
+        fund_flow_cache[key] = info
+        return info
+
+    def _fund_flow_precheck(sym: str, asset: str) -> tuple[bool, dict[str, object] | None]:
+        if not bool(fund_flow_check):
+            return True, None
+        if str(asset or "").strip().lower() != "stock":
+            return True, None
+
+        info = _fund_flow_info(sym, asset)
+        fund_flow_stats["checked"] = int(fund_flow_stats.get("checked") or 0) + 1
+        decision = _fund_flow_decision_for_score(
+            info.get("score01") if isinstance(info, dict) else None,
+            float(fund_flow_block_score),
+            float(fund_flow_warn_score),
+        )
+        if isinstance(info, dict):
+            info["decision"] = decision
+
+        src = str((info or {}).get("source") or "unknown")
+        src_counts = fund_flow_stats.get("sources") if isinstance(fund_flow_stats.get("sources"), dict) else {}
+        src_counts[src] = int(src_counts.get(src) or 0) + 1
+        fund_flow_stats["sources"] = src_counts
+
+        score_v = info.get("score01") if isinstance(info, dict) else None
+        score_s = f"{float(score_v):.2f}" if score_v is not None else "NA"
+        key = _ff_key(asset, sym)
+        warn_key = f"{decision}:{key}"
+
+        if decision == "block":
+            fund_flow_stats["blocked"] = int(fund_flow_stats.get("blocked") or 0) + 1
+            if warn_key not in fund_flow_warned:
+                warnings.append(
+                    f"主力资金复核：{sym} score01={score_s} < {fund_flow_block_score:.2f}（{src}），阻断买入"
+                )
+                fund_flow_warned.add(warn_key)
+            return False, info
+        if decision == "warn":
+            fund_flow_stats["warned"] = int(fund_flow_stats.get("warned") or 0) + 1
+            if warn_key not in fund_flow_warned:
+                warnings.append(
+                    f"主力资金复核：{sym} score01={score_s} < {fund_flow_warn_score:.2f}（{src}），保留买入但标记风险"
+                )
+                fund_flow_warned.add(warn_key)
+            return True, info
+        if decision == "skip":
+            fund_flow_stats["skipped"] = int(fund_flow_stats.get("skipped") or 0) + 1
+            if warn_key not in fund_flow_warned:
+                warnings.append(f"主力资金复核：{sym} 无有效 score01（{src}），本次不拦截")
+                fund_flow_warned.add(warn_key)
+            return True, info
+
+        fund_flow_stats["passed"] = int(fund_flow_stats.get("passed") or 0) + 1
+        return True, info
+
     lot = max(1, int(getattr(args, "lot_size", 100) or 100))
     tb_cfg = TradeabilityConfig(
         limit_up_pct=float(getattr(args, "limit_up_pct", 0.0) or 0.0),
@@ -1108,29 +1573,31 @@ def cmd_rebalance_user(args: argparse.Namespace) -> int:
     cache_ttl_hours = float(getattr(args, "cache_ttl_hours", 6.0) or 6.0)
     daily_df_cache: dict[str, Any] = {}
 
-    def _df_daily(sym: str):
+    def _df_daily(sym: str, asset: str):
         s = str(sym or "").strip()
+        a = str(asset or "etf").strip().lower() or "etf"
         if not s:
             return None
-        if s in daily_df_cache:
-            return daily_df_cache[s]
+        key = f"{a}:{s}"
+        if key in daily_df_cache:
+            return daily_df_cache[key]
         try:
-            sym2 = resolve_symbol("etf", s)
+            sym2 = resolve_symbol(a, s)
         except Exception:  # noqa: BLE001
             sym2 = s
         try:
             df = fetch_daily_cached(
-                FetchParams(asset="etf", symbol=str(sym2), adjust="qfq"),
-                cache_dir=Path("data") / "cache" / "etf",
+                FetchParams(asset=str(a), symbol=str(sym2), adjust=(stock_adjust if a == "stock" else "qfq")),
+                cache_dir=Path("data") / "cache" / str(a),
                 ttl_hours=float(cache_ttl_hours),
             )
         except Exception:  # noqa: BLE001
             df = None
-        daily_df_cache[s] = df
+        daily_df_cache[key] = df
         return df
 
-    def _tradeability_last_bar(sym: str) -> dict[str, Any] | None:
-        df = _df_daily(sym)
+    def _tradeability_last_bar(sym: str, asset: str) -> dict[str, Any] | None:
+        df = _df_daily(sym, asset)
         if df is None or getattr(df, "empty", True):
             return None
         try:
@@ -1170,7 +1637,7 @@ def cmd_rebalance_user(args: argparse.Namespace) -> int:
         except (TypeError, ValueError, OverflowError):  # noqa: BLE001
             return None
 
-    # 当前持仓 map（只管 ETF；股票先当“手动账户”处理）
+    # 当前持仓 map（ETF/stock 都纳入）
     positions_mv_yuan = 0.0
     cur_shares: dict[str, int] = {}
     cur_close: dict[str, float] = {}
@@ -1183,7 +1650,8 @@ def cmd_rebalance_user(args: argparse.Namespace) -> int:
             mv = 0.0
         if mv > 0:
             positions_mv_yuan += float(mv)
-        if str(it.get("asset") or "").strip().lower() != "etf":
+        asset = str(it.get("asset") or "").strip().lower() or _guess_asset_for_user_holding_symbol(str(it.get("symbol") or ""))
+        if asset not in {"etf", "stock"}:
             continue
         sym = str(it.get("symbol") or "").strip()
         if not sym:
@@ -1194,13 +1662,14 @@ def cmd_rebalance_user(args: argparse.Namespace) -> int:
             sh = 0
         if sh <= 0:
             continue
-        cur_shares[sym] = int(sh)
+        key = f"{asset}:{sym}"
+        cur_shares[key] = int(sh)
         try:
             c = float(it.get("close")) if it.get("close") is not None else None
         except (TypeError, ValueError, OverflowError, AttributeError):  # noqa: BLE001
             c = None
         if c is not None and c > 0:
-            cur_close[sym] = float(c)
+            cur_close[key] = float(c)
 
     # 目标仓位 map（由 plan.plans 决定；按 entry close 估算）
     targets: list[dict[str, Any]] = []
@@ -1211,6 +1680,7 @@ def cmd_rebalance_user(args: argparse.Namespace) -> int:
         if not isinstance(p, dict) or not bool(p.get("ok")):
             continue
         sym = str(p.get("symbol") or "").strip()
+        asset = str(p.get("asset") or "etf").strip().lower() or "etf"
         if not sym:
             continue
         try:
@@ -1219,11 +1689,13 @@ def cmd_rebalance_user(args: argparse.Namespace) -> int:
             tsh = 0
         if tsh <= 0:
             continue
-        target_shares[sym] = int(tsh)
-        cur = int(cur_shares.get(sym, 0))
+        key = f"{asset}:{sym}"
+        target_shares[key] = int(tsh)
+        cur = int(cur_shares.get(key, 0))
         delta = int(tsh - cur)
         targets.append(
             {
+                "asset": asset,
                 "symbol": sym,
                 "name": str(p.get("name") or "").strip(),
                 "entry": p.get("entry"),
@@ -1282,27 +1754,28 @@ def cmd_rebalance_user(args: argparse.Namespace) -> int:
         if exposure_buy_budget_yuan < 0:
             exposure_buy_budget_yuan = 0.0
     cache_ttl_hours = float(getattr(args, "cache_ttl_hours", 6.0) or 6.0)
-    cache_dir = Path("data") / "cache" / "etf"
 
     # 估算用成本模型（统一口径，尽量别让“现金估算”瞎飘）
     cost_base = trade_cost_from_params(roundtrip_cost_yuan=float(rt), min_fee_yuan=float(min_fee_yuan), buy_cost=float(buy_cost), sell_cost=float(sell_cost))
 
     slip_cache: dict[str, dict[str, Any]] = {}
 
-    def _slip_for(sym: str) -> dict[str, Any]:
+    def _slip_for(sym: str, asset: str) -> dict[str, Any]:
         sym2 = str(sym)
-        if sym2 in slip_cache:
-            return slip_cache[sym2]
+        a2 = str(asset or "etf").strip().lower() or "etf"
+        key = f"{a2}:{sym2}"
+        if key in slip_cache:
+            return slip_cache[key]
         if str(slip_mode) in {"", "none", "off", "0", "false"}:
             out = {"slippage_mode": "none", "slippage_bps": 0.0, "slippage_rate": 0.0, "amount_avg20_yuan": None}
-            slip_cache[sym2] = out
+            slip_cache[key] = out
             return out
 
         amt_avg20 = None
         try:
             df = fetch_daily_cached(
-                FetchParams(asset="etf", symbol=sym2),
-                cache_dir=cache_dir,
+                FetchParams(asset=a2, symbol=sym2, adjust=(stock_adjust if a2 == "stock" else "qfq")),
+                cache_dir=Path("data") / "cache" / a2,
                 ttl_hours=float(cache_ttl_hours),
             )
             if df is not None and (not getattr(df, "empty", True)):
@@ -1340,11 +1813,11 @@ def cmd_rebalance_user(args: argparse.Namespace) -> int:
             "slippage_rate": float(bps_to_rate(float(slip_bps2))),
             "amount_avg20_yuan": (float(amt_avg20) if amt_avg20 is not None else None),
         }
-        slip_cache[sym2] = out
+        slip_cache[key] = out
         return out
 
-    def _cost_for(sym: str) -> tuple[TradeCost, dict[str, Any]]:
-        slip = _slip_for(sym)
+    def _cost_for(sym: str, asset: str) -> tuple[TradeCost, dict[str, Any]]:
+        slip = _slip_for(sym, asset)
         r = float(slip.get("slippage_rate") or 0.0)
         c = TradeCost(
             buy_cost=float(cost_base.buy_cost) + float(r),
@@ -1379,14 +1852,14 @@ def cmd_rebalance_user(args: argparse.Namespace) -> int:
         lot2 = max(1, int(lot))
         return int(((raw + lot2 - 1) // lot2) * lot2)
 
-    def _append_sell(*, sym: str, sh: int, price_ref: float | None, reason: str) -> float:
+    def _append_sell(*, sym: str, asset: str, sh: int, price_ref: float | None, reason: str) -> float:
         nonlocal cash_in_est
         px = float(price_ref) if price_ref is not None else None
         if px is None or px <= 0 or int(sh) <= 0:
             return 0.0
 
-        cost2, slip2 = _cost_for(sym)
-        tb = _tradeability_last_bar(sym)
+        cost2, slip2 = _cost_for(sym, asset)
+        tb = _tradeability_last_bar(sym, asset)
         flags = tb.get("flags") if isinstance(tb, dict) else {}
         notional = float(sh) * float(px)
         cash_in, fee = cash_sell(shares=int(sh), price=float(px), cost=cost2)
@@ -1394,7 +1867,7 @@ def cmd_rebalance_user(args: argparse.Namespace) -> int:
         orders.append(
             {
                 "side": "sell",
-                "asset": "etf",
+                "asset": str(asset),
                 "symbol": sym,
                 "shares": int(sh),
                 "lot_size": int(lot),
@@ -1418,43 +1891,44 @@ def cmd_rebalance_user(args: argparse.Namespace) -> int:
         )
         return float(cash_in)
 
-    def _append_buy(*, sym: str, sh: int, price_ref: float | None, reason: str) -> float:
+    def _append_buy(*, sym: str, asset: str, sh: int, price_ref: float | None, reason: str, ff_info: dict[str, object] | None = None) -> float:
         nonlocal cash_out_est
         px = float(price_ref) if price_ref is not None else None
         if px is None or px <= 0 or int(sh) <= 0:
             return 0.0
 
-        cost2, slip2 = _cost_for(sym)
-        tb = _tradeability_last_bar(sym)
+        cost2, slip2 = _cost_for(sym, asset)
+        tb = _tradeability_last_bar(sym, asset)
         flags = tb.get("flags") if isinstance(tb, dict) else {}
         notional = float(sh) * float(px)
         cash_out, fee = cash_buy(shares=int(sh), price=float(px), cost=cost2)
         cash_out_est += float(cash_out)
-        orders.append(
-            {
-                "side": "buy",
-                "asset": "etf",
-                "symbol": sym,
-                "shares": int(sh),
-                "lot_size": int(lot),
-                "signal_date": str((market_regime or {}).get("last_date") or (market_regime or {}).get("date") or ""),
-                "exec": "next_open",
-                "price_ref": float(px) if px is not None else None,
-                "price_ref_type": "close",
-                "order_type": "market",
-                "limit_price": None,
-                "est_notional_yuan": float(notional),
-                "est_cash": float(cash_out),
-                "est_fee_yuan": float(fee),
-                "min_notional_for_min_fee_yuan": min_notional_for_min_fee(cost_rate=float(buy_cost), min_fee_yuan=float(min_fee_yuan)),
-                "min_trade_notional_yuan": min_notional_for_min_fee(cost_rate=float(buy_cost), min_fee_yuan=float(min_fee_yuan)),
-                "slippage": slip2,
-                "tradeability_last_bar": tb,
-                "halt_risk": bool(flags.get("halted")) if isinstance(flags, dict) else None,
-                "limit_up_risk": bool(flags.get("locked_limit_up")) if isinstance(flags, dict) else None,
-                "reason": str(reason),
-            }
-        )
+        order = {
+            "side": "buy",
+            "asset": str(asset),
+            "symbol": sym,
+            "shares": int(sh),
+            "lot_size": int(lot),
+            "signal_date": str((market_regime or {}).get("last_date") or (market_regime or {}).get("date") or ""),
+            "exec": "next_open",
+            "price_ref": float(px) if px is not None else None,
+            "price_ref_type": "close",
+            "order_type": "market",
+            "limit_price": None,
+            "est_notional_yuan": float(notional),
+            "est_cash": float(cash_out),
+            "est_fee_yuan": float(fee),
+            "min_notional_for_min_fee_yuan": min_notional_for_min_fee(cost_rate=float(buy_cost), min_fee_yuan=float(min_fee_yuan)),
+            "min_trade_notional_yuan": min_notional_for_min_fee(cost_rate=float(buy_cost), min_fee_yuan=float(min_fee_yuan)),
+            "slippage": slip2,
+            "tradeability_last_bar": tb,
+            "halt_risk": bool(flags.get("halted")) if isinstance(flags, dict) else None,
+            "limit_up_risk": bool(flags.get("locked_limit_up")) if isinstance(flags, dict) else None,
+            "reason": str(reason),
+        }
+        if isinstance(ff_info, dict):
+            order["fund_flow_check"] = ff_info
+        orders.append(order)
         return float(cash_out)
 
     if mode == "rotate":
@@ -1463,24 +1937,33 @@ def cmd_rebalance_user(args: argparse.Namespace) -> int:
             warnings.append("rotate 保护：目标组合为空（signals过滤/条件失败/数据缺失），本次不执行任何卖出/买入")
         else:
             # 1) 卖出：先清掉“非目标”，再处理“超配减仓”
-            for sym, sh in sorted(cur_shares.items()):
+            for key, sh in sorted(cur_shares.items()):
+                asset, sym = key.split(":", 1) if ":" in key else ("etf", key)
                 if sym in frozen_syms or sym in grid_exempt_syms:
                     continue
-                if sym not in target_shares:
-                    _append_sell(sym=sym, sh=int(sh), price_ref=cur_close.get(sym), reason="rotate: 非目标清仓")
+                if key not in target_shares:
+                    _append_sell(sym=sym, asset=asset, sh=int(sh), price_ref=cur_close.get(key), reason="rotate: 非目标清仓")
             for t in targets:
                 sym = str(t.get("symbol") or "")
+                asset = str(t.get("asset") or "etf").strip().lower() or "etf"
                 if sym in frozen_syms or sym in grid_exempt_syms:
                     continue
                 delta = int(t.get("delta_shares") or 0)
                 if delta < 0:
-                    _append_sell(sym=sym, sh=int(_floor_to_lot(-delta)), price_ref=cur_close.get(sym), reason="rotate: 减仓到目标")
+                    _append_sell(
+                        sym=sym,
+                        asset=asset,
+                        sh=int(_floor_to_lot(-delta)),
+                        price_ref=cur_close.get(f"{asset}:{sym}"),
+                        reason="rotate: 减仓到目标",
+                    )
 
             cash_avail = float(cash_amount or 0.0) + float(cash_in_est)
 
             # 2) 买入：按 plan 顺序加仓到目标（现金不够就截断）
             for t in targets:
                 sym = str(t.get("symbol") or "")
+                asset = str(t.get("asset") or "etf").strip().lower() or "etf"
                 if sym in frozen_syms or sym in grid_exempt_syms:
                     continue
                 delta = int(t.get("delta_shares") or 0)
@@ -1496,7 +1979,7 @@ def cmd_rebalance_user(args: argparse.Namespace) -> int:
                 want = _floor_to_lot(int(delta))
                 if want <= 0:
                     continue
-                cost2, _ = _cost_for(sym)
+                cost2, _ = _cost_for(sym, asset)
                 affordable = int(calc_shares_for_capital(capital_yuan=float(cash_avail), price=float(entry), cost=cost2, lot_size=int(lot)))
                 buy_sh = int(min(want, affordable))
                 if buy_sh <= 0:
@@ -1521,7 +2004,12 @@ def cmd_rebalance_user(args: argparse.Namespace) -> int:
                             f"单笔金额门槛：{sym} 本次可买{buy_sh}份≈{est_notional:.0f} < {min_trade_notional_yuan:.0f}（需要≥{min_sh}份），跳过"
                         )
                         continue
-                cash_need = float(_append_buy(sym=sym, sh=int(buy_sh), price_ref=entry, reason="rotate: 加仓到目标"))
+                ff_ok, ff_info = _fund_flow_precheck(sym=sym, asset=asset)
+                if not ff_ok:
+                    continue
+                cash_need = float(
+                    _append_buy(sym=sym, asset=asset, sh=int(buy_sh), price_ref=entry, reason="rotate: 加仓到目标", ff_info=ff_info)
+                )
                 cash_avail -= float(cash_need)
                 buy_turnover_used_yuan += float(buy_sh) * float(entry)
     else:
@@ -1531,6 +2019,7 @@ def cmd_rebalance_user(args: argparse.Namespace) -> int:
         cash_avail = float(cash_amount or 0.0)
         for t in targets:
             sym = str(t.get("symbol") or "")
+            asset = str(t.get("asset") or "etf").strip().lower() or "etf"
             if sym in frozen_syms or sym in grid_exempt_syms:
                 continue
             delta = int(t.get("delta_shares") or 0)
@@ -1548,7 +2037,7 @@ def cmd_rebalance_user(args: argparse.Namespace) -> int:
             want = _floor_to_lot(int(delta))
             if want <= 0:
                 continue
-            cost2, _ = _cost_for(sym)
+            cost2, _ = _cost_for(sym, asset)
             affordable = int(calc_shares_for_capital(capital_yuan=float(cash_avail), price=float(entry), cost=cost2, lot_size=int(lot)))
             buy_sh = int(min(want, affordable))
             if buy_sh <= 0:
@@ -1582,7 +2071,12 @@ def cmd_rebalance_user(args: argparse.Namespace) -> int:
                         f"单笔金额门槛：{sym} 本次可买{buy_sh}份≈{est_notional:.0f} < {min_trade_notional_yuan:.0f}（需要≥{min_sh}份），跳过"
                     )
                     continue
-            cash_need = float(_append_buy(sym=sym, sh=int(buy_sh), price_ref=entry, reason="add: 增量加仓"))
+            ff_ok, ff_info = _fund_flow_precheck(sym=sym, asset=asset)
+            if not ff_ok:
+                continue
+            cash_need = float(
+                _append_buy(sym=sym, asset=asset, sh=int(buy_sh), price_ref=entry, reason="add: 增量加仓", ff_info=ff_info)
+            )
             cash_avail -= float(cash_need)
             buy_turnover_used_yuan += float(buy_sh) * float(entry)
             exposure_buy_used_yuan += float(buy_sh) * float(entry)
@@ -1622,6 +2116,16 @@ def cmd_rebalance_user(args: argparse.Namespace) -> int:
                     "max_positions": int(max_positions_eff) if max_positions_eff is not None else None,
                     "max_position_pct": float(max_position_pct_eff) if max_position_pct_eff is not None else None,
                     "max_turnover_pct_buy_side": float(max_turnover_pct) if max_turnover_pct > 0 else None,
+                    "core_satellite": core_satellite_summary,
+                    "fund_flow_check": {
+                        "enabled": bool(fund_flow_check),
+                        "mode": str(fund_flow_mode),
+                        "block_score01": float(fund_flow_block_score),
+                        "warn_score01": float(fund_flow_warn_score),
+                        "stats": fund_flow_stats,
+                        "note": "仅对 stock buy 生效；无数据不拦截（只降不升）",
+                    },
+                    "national_team_guard": nt_guard_info,
                 },
                 "vol_target": {
                     "target_ann": float(vol_target) if vol_target > 0 else None,

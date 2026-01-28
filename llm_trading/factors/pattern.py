@@ -290,9 +290,9 @@ class RewardRiskFactor(Factor):
     """
     赔率 proxy（高赔率左侧低吸用）。
 
-    目标：把“离支撑近（风险小）+ 离近期高点远（潜在收益大）”量化成 0~1 分。
-    - support: 默认用 MA(50) 作为关键支撑（周线≈一年均线）
-    - reward: 近期最高价 - 当前价（默认回看 52 根K）
+    目标：把“离支撑近（风险小）+ 离上方结构位远（潜在收益大）”量化成 0~1 分。
+    - support: swing_low / 箱体下沿 / MA(20) 中取更保守者（更贴近“左侧低吸”）
+    - target: 前高 / 箱体上沿 / Donchian 上轨中取更保守者
     - risk: 当前价 - 支撑位（<=0 视为跌破支撑，不做多）
     """
 
@@ -301,7 +301,10 @@ class RewardRiskFactor(Factor):
     description = "赔率：到关键支撑的风险 vs 到近期高点的潜在收益（左侧低吸筛选）"
 
     default_params = {
-        "support_ma_period": 50,
+        "support_ma_period": 20,
+        "swing_lookback": 20,
+        "box_lookback": 26,
+        "donchian_lookback": 20,
         "lookback_high": 52,
         "rr_good": 2.5,  # >=2.5 视为“赔率还行”
         "rr_excellent": 4.0,  # >=4 视为“赔率很高”
@@ -311,15 +314,25 @@ class RewardRiskFactor(Factor):
     def compute(self, df: pd.DataFrame) -> FactorResult:
         try:
             ma_p = int(self.params["support_ma_period"])
+            swing_lb = int(self.params["swing_lookback"])
+            box_lb = int(self.params["box_lookback"])
+            donch_lb = int(self.params["donchian_lookback"])
             lb = int(self.params["lookback_high"])
             rr_good = float(self.params["rr_good"])
             rr_ex = float(self.params["rr_excellent"])
             max_dist = float(self.params["max_dist_support_pct"])
         except (TypeError, ValueError, OverflowError, KeyError, AttributeError):  # noqa: BLE001
-            ma_p, lb, rr_good, rr_ex, max_dist = 50, 52, 2.5, 4.0, 0.10
+            ma_p, swing_lb, box_lb, donch_lb, lb, rr_good, rr_ex, max_dist = 20, 20, 26, 20, 52, 2.5, 4.0, 0.10
+
+        ma_p = max(2, int(ma_p))
+        swing_lb = max(2, int(swing_lb))
+        box_lb = max(2, int(box_lb))
+        donch_lb = max(2, int(donch_lb))
+        lb = max(2, int(lb))
 
         need = {"close"}
-        if df is None or (not need.issubset(set(df.columns))) or len(df) < max(ma_p, lb) + 2:
+        min_len = max(ma_p, swing_lb, box_lb, donch_lb, lb) + 2
+        if df is None or (not need.issubset(set(df.columns))) or len(df) < min_len:
             return FactorResult(
                 name=self.name,
                 value=0.0,
@@ -333,37 +346,124 @@ class RewardRiskFactor(Factor):
         high = close
         if "high" in df.columns:
             high = pd.to_numeric(df["high"], errors="coerce").astype(float)
+        low = close
+        if "low" in df.columns:
+            low = pd.to_numeric(df["low"], errors="coerce").astype(float)
 
-        c = float(close.iloc[-1])
-        support = float(close.rolling(ma_p, min_periods=ma_p).mean().iloc[-1])
+        def _sf(x) -> float | None:
+            try:
+                v = float(x)
+            except (TypeError, ValueError, OverflowError):  # noqa: BLE001
+                return None
+            if not np.isfinite(v) or v <= 0:
+                return None
+            return float(v)
 
-        # 只用历史窗口的最高价（包含当前K也不构成未来函数；这里只是“目标位”参考，不是回测打分用）
-        recent_high = float(high.iloc[-lb:].max())
+        def _last(s) -> float | None:
+            if s is None or len(s) == 0:
+                return None
+            return _sf(s.iloc[-1])
 
-        details = {
-            "support_ma_period": ma_p,
-            "lookback_high": lb,
-            "close": c,
-            "support": support,
-            "recent_high": recent_high,
+        c = _sf(close.iloc[-1])
+
+        support_ma = _last(close.rolling(ma_p, min_periods=ma_p).mean())
+        swing_low = _last(low.shift(1).rolling(swing_lb, min_periods=swing_lb).min())
+        swing_high = _last(high.shift(1).rolling(swing_lb, min_periods=swing_lb).max())
+        box_low = _last(low.shift(1).rolling(box_lb, min_periods=box_lb).min())
+        box_high = _last(high.shift(1).rolling(box_lb, min_periods=box_lb).max())
+        donchian_upper = _last(high.shift(1).rolling(donch_lb, min_periods=donch_lb).max())
+        prior_high = _last(high.shift(1).rolling(lb, min_periods=lb).max())
+
+        support_candidates = {
+            "swing_low": swing_low,
+            "box_low": box_low,
+            "ma": support_ma,
+        }
+        target_candidates = {
+            "prior_high": prior_high,
+            "box_high": box_high,
+            "donchian_upper": donchian_upper,
         }
 
-        if not np.isfinite(c) or c <= 0 or (not np.isfinite(support)) or support <= 0:
+        def _pick_support(cands: dict[str, float | None], close_px: float) -> tuple[float | None, str | None, bool]:
+            valid = {k: v for k, v in cands.items() if v is not None and np.isfinite(v) and v > 0}
+            if not valid:
+                return None, None, False
+            below = {k: v for k, v in valid.items() if v <= close_px}
+            if below:
+                k = max(below, key=below.get)
+                return float(below[k]), k, True
+            # 全部在价格上方：选最“近”的（最高），视为已失效
+            k = max(valid, key=valid.get)
+            return float(valid[k]), k, False
+
+        def _pick_target(cands: dict[str, float | None], close_px: float) -> tuple[float | None, str | None, bool]:
+            valid = {k: v for k, v in cands.items() if v is not None and np.isfinite(v) and v > 0}
+            if not valid:
+                return None, None, False
+            above = {k: v for k, v in valid.items() if v >= close_px}
+            if above:
+                k = min(above, key=above.get)
+                return float(above[k]), k, True
+            # 没有上方目标：用最高参考位（reward=0）
+            k = max(valid, key=valid.get)
+            return float(valid[k]), k, False
+
+        if c is None:
             return FactorResult(
                 name=self.name,
                 value=0.0,
                 score=0.5,
                 direction="neutral",
                 confidence=0.0,
-                details={**details, "error": "价格无效"},
+                details={"error": "价格无效"},
             )
 
-        risk = float(c - support)
-        reward = float(max(0.0, recent_high - c))
+        support, support_kind, support_below = _pick_support(support_candidates, c)
+        target, target_kind, target_above = _pick_target(target_candidates, c)
+
+        details = {
+            "support_ma_period": ma_p,
+            "swing_lookback": swing_lb,
+            "box_lookback": box_lb,
+            "donchian_lookback": donch_lb,
+            "lookback_high": lb,
+            "close": c,
+            "support": support,
+            "target": target,
+            "support_kind": support_kind,
+            "target_kind": target_kind,
+            "support_selected_below": support_below,
+            "target_selected_above": target_above,
+            "support_candidates": support_candidates,
+            "target_candidates": target_candidates,
+            "swing_low": swing_low,
+            "swing_high": swing_high,
+            "box_low": box_low,
+            "box_high": box_high,
+            "donchian_upper": donchian_upper,
+            "prior_high": prior_high,
+        }
+
+        if support is None or support <= 0:
+            return FactorResult(
+                name=self.name,
+                value=0.0,
+                score=0.5,
+                direction="neutral",
+                confidence=0.0,
+                details={**details, "error": "支撑缺失"},
+            )
+
+        if target is None or target <= 0:
+            target = c
+
+        risk = float(c - float(support))
+        reward = float(max(0.0, float(target) - c))
         rr = float(reward / risk) if risk > 0 else 0.0
 
         # 价格离支撑太远：再高的 rr 也容易是“追涨假装低吸”
-        dist_pct = float((c / support) - 1.0)
+        dist_pct = float((c / float(support)) - 1.0) if support > 0 else 0.0
         dist_penalty = 1.0
         if dist_pct > max_dist and max_dist > 0:
             # 线性扣分：dist=max_dist => 1；dist=2*max_dist => 0

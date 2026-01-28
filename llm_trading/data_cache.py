@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import json
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from .akshare_source import FetchParams, fetch_daily
+from .akshare_source import FetchParams, fetch_daily, resolve_price_source
 from .logger import get_logger
 from .utils_time import as_yyyymmdd, parse_date_any
 
@@ -19,9 +20,7 @@ def _prefer_tushare(params: FetchParams) -> bool:
     - 仅当 params.source 显式为 tushare/auto 时，才允许走 TuShare（否则默认按 AkShare 口径缓存）
     - 且本地确实配置了 TUSHARE_TOKEN
     """
-    src = str(getattr(params, "source", "") or "").strip().lower()
-    if not src:
-        return False
+    src = resolve_price_source(getattr(params, "source", None), asset=str(getattr(params, "asset", "") or ""))
     if src not in {"auto", "tushare"}:
         return False
     try:
@@ -43,6 +42,61 @@ def _has_non_ascii_columns(df) -> bool:
         if any(ord(ch) > 127 for ch in s):
             return True
     return False
+
+
+def _read_cache_meta(meta_path: Path) -> dict[str, Any] | None:
+    try:
+        if not meta_path.exists():
+            return None
+        txt = meta_path.read_text(encoding="utf-8")
+        obj = json.loads(txt)
+        return obj if isinstance(obj, dict) else None
+    except (OSError, ValueError, TypeError, AttributeError):  # noqa: BLE001
+        return None
+
+
+def _write_cache_meta(meta_path: Path, meta: dict[str, Any]) -> None:
+    try:
+        meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    except (OSError, ValueError, TypeError, AttributeError):  # noqa: BLE001
+        return None
+
+
+def _attach_meta_to_df(df, meta: dict[str, Any] | None) -> None:
+    if df is None or meta is None:
+        return
+    try:
+        for k in (
+            "data_source",
+            "data_source_warning",
+            "source_requested",
+            "adjust",
+            "asset",
+            "symbol",
+            "updated_at",
+            "as_of",
+            "intraday_unclosed",
+        ):
+            if k in meta:
+                df.attrs[k] = meta[k]  # type: ignore[union-attr]
+    except (AttributeError, TypeError, ValueError):  # noqa: BLE001
+        return
+
+
+def _capture_df_meta(df) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    try:
+        attrs = getattr(df, "attrs", {}) or {}
+        if isinstance(attrs, dict):
+            if attrs.get("data_source"):
+                out["data_source"] = attrs.get("data_source")
+            if attrs.get("data_source_warning"):
+                out["data_source_warning"] = attrs.get("data_source_warning")
+            if attrs.get("data_source_auto_fallback_error"):
+                out["data_source_warning"] = attrs.get("data_source_auto_fallback_error")
+    except (AttributeError, TypeError, ValueError):  # noqa: BLE001
+        return out
+    return out
 
 
 def _should_expect_new_bar(now: datetime, *, asset: str) -> bool:
@@ -110,6 +164,9 @@ def fetch_daily_cached(params: FetchParams, *, cache_dir: Path, ttl_hours: float
     adjust = params.adjust if params.adjust is not None else "qfq"
     key = f"{params.asset}_{params.symbol}_{adjust}.csv".replace("/", "_").replace("\\", "_")
     path = cache_dir / key
+    meta_path = path.with_suffix(path.suffix + ".meta.json")
+    meta_cache = _read_cache_meta(meta_path)
+    last_fetch_meta: dict[str, Any] = {}
 
     want_start = parse_date_any(params.start_date) if params.start_date else None
     want_end = parse_date_any(params.end_date) if params.end_date else None
@@ -145,6 +202,7 @@ def fetch_daily_cached(params: FetchParams, *, cache_dir: Path, ttl_hours: float
                 cache_min = df_cache["date"].iloc[0]
                 cache_max = df_cache["date"].iloc[-1]
                 cache_ok = True
+            _attach_meta_to_df(df_cache, meta_cache)
         except (KeyError, IndexError, AttributeError) as exc:  # noqa: BLE001
             df_cache = None
             cache_ok = False
@@ -208,7 +266,9 @@ def fetch_daily_cached(params: FetchParams, *, cache_dir: Path, ttl_hours: float
                 start_date=p2.start_date,
                 end_date=as_yyyymmdd(end_dt),
             )
-        return fetch_daily(p2)
+        df2 = fetch_daily(p2)
+        last_fetch_meta.update(_capture_df_meta(df2))
+        return df2
 
     # 额外：把 AkShare 的“中文列口径”缓存迁移到 TuShare/标准列（只刷尾部，避免全量重拉）
     if migrate_to_tushare and cache_ok and df_work is not None and cache_max is not None:
@@ -282,7 +342,9 @@ def fetch_daily_cached(params: FetchParams, *, cache_dir: Path, ttl_hours: float
 
     # 3) 如果最终还是没有，就全量拉一次（兜底）
     if df_work is None or getattr(df_work, "empty", True):
-        df_work = _normalize(fetch_daily(params))
+        df_full = fetch_daily(params)
+        last_fetch_meta.update(_capture_df_meta(df_full))
+        df_work = _normalize(df_full)
 
     # 4) 去重/排序并写回缓存
     try:
@@ -291,6 +353,46 @@ def fetch_daily_cached(params: FetchParams, *, cache_dir: Path, ttl_hours: float
         df_work.to_csv(path, index=False, encoding="utf-8")
     except (AttributeError) as exc:  # noqa: BLE001
         suppressed.append({"stage": "write_cache", "error": str(exc)})
+
+    # 写 cache meta（不影响主流程）
+    try:
+        meta = meta_cache if isinstance(meta_cache, dict) else {}
+        if last_fetch_meta:
+            meta.update(last_fetch_meta)
+        meta.update(
+            {
+                "asset": str(params.asset),
+                "symbol": str(params.symbol),
+                "adjust": str(adjust),
+                "source_requested": resolve_price_source(getattr(params, "source", None), asset=str(params.asset)),
+                "updated_at": datetime.now().isoformat(timespec="seconds"),
+            }
+        )
+        try:
+            if df_work is not None and (not getattr(df_work, "empty", True)) and "date" in df_work.columns:
+                last_dt = df_work["date"].iloc[-1]
+                meta["as_of"] = str(last_dt.date()) if hasattr(last_dt, "date") else str(last_dt)
+        except (TypeError, ValueError, KeyError, IndexError, AttributeError):  # noqa: BLE001
+            pass
+        # 如果用户显式传 end_date，且当前仍未收盘，标记可能是盘中价
+        intraday_unclosed = False
+        try:
+            if getattr(params, "end_date", None):
+                now = datetime.now()
+                if (now.hour, now.minute) < (15, 5):
+                    last_date = None
+                    if df_work is not None and "date" in df_work.columns:
+                        last_dt = df_work["date"].iloc[-1]
+                        last_date = last_dt.date() if hasattr(last_dt, "date") else None
+                    if last_date == now.date():
+                        intraday_unclosed = True
+        except (AttributeError, TypeError, ValueError, KeyError, IndexError):  # noqa: BLE001
+            intraday_unclosed = False
+        meta["intraday_unclosed"] = bool(intraday_unclosed)
+        _write_cache_meta(meta_path, meta)
+        _attach_meta_to_df(df_work, meta)
+    except (OSError, ValueError, TypeError, AttributeError):  # noqa: BLE001
+        pass
 
     # 吞错也要让人看见：默认只打一条 warning，避免扫描时刷屏到死。
     if suppressed:

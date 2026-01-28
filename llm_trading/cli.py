@@ -15,7 +15,9 @@ from .cli_commands import (
     cmd_analyze,
     cmd_chat,
     cmd_clean_outputs,
+    cmd_commodity_chain,
     cmd_data_doctor,
+    cmd_daily_brief,
     cmd_dynamic_weights,
     cmd_factor_research,
     cmd_eval_bbb,
@@ -42,6 +44,7 @@ from .cli_commands import (
     cmd_sql_query,
     cmd_sql_sync,
     cmd_strategy_align,
+    cmd_verify_prices,
 )
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="llm_trading", description="LLM辅助交易：威科夫读图 + 自动标注出图")
@@ -307,6 +310,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_scan.add_argument("--verbose", action="store_true", help="打印扫描进度（可选）")
     p_scan.set_defaults(func=cmd_scan_etf)
 
+    p_chain = sub.add_parser("commodity-chain", help="扫描大宗商品链路 ETF 热度（黄金→有色→油化→农产品）")
+    p_chain.add_argument("--min-days", type=int, default=80, help="最少历史天数（默认 80）")
+    p_chain.add_argument("--top-k", type=int, default=3, help="每段输出 Top K（默认 3）")
+    p_chain.add_argument("--out-dir", default=str(Path("outputs") / "agents"), help="输出目录（默认 outputs/agents）")
+    p_chain.set_defaults(func=cmd_commodity_chain)
+
     p_plan = sub.add_parser("plan-etf", help="根据 scan-etf 的 BBB 结果生成仓位/止损计划（研究用途）")
     p_plan.add_argument("--scan-dir", default=None, help="scan-etf 输出目录（默认读取 <scan-dir>/top_bbb.json）")
     p_plan.add_argument("--input", default=None, help="直接指定 top_bbb.json 路径（优先级高于 --scan-dir）")
@@ -491,7 +500,39 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="单标的最大仓位占比（例如 0.30=30%%；默认读 user_holdings.trade_rules.max_position_pct；为空=不限制）",
     )
-    p_reb_user.add_argument("--returns-cache-dir", default=None, help="相关性/分散用的 ETF 日线缓存目录（默认 data/cache/etf）")
+    p_reb_user.add_argument(
+        "--core-satellite",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="ETF+stock 混合时启用核心+卫星（默认启用；--no-core-satellite 关闭）",
+    )
+    p_reb_user.add_argument("--national-team-path", default=None, help="national_team.json 路径（可选；用于国家队风险过滤）")
+    p_reb_user.add_argument(
+        "--national-team-guard",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="启用国家队 proxy 风险过滤（默认启用；--no-national-team-guard 关闭）",
+    )
+    p_reb_user.add_argument("--national-team-min-score", type=float, default=0.40, help="国家队风险过滤：risk_off 阈值（默认 0.40）")
+    p_reb_user.add_argument("--national-team-warn-score", type=float, default=0.55, help="国家队风险过滤：caution 阈值（默认 0.55）")
+    p_reb_user.add_argument("--national-team-scale-low", type=float, default=0.35, help="risk_off 时最大仓位缩放比例（默认 0.35）")
+    p_reb_user.add_argument("--national-team-scale-mid", type=float, default=0.70, help="caution 时最大仓位缩放比例（默认 0.70）")
+    p_reb_user.add_argument("--national-team-max-positions-low", type=int, default=1, help="risk_off 时最多持仓数上限（默认 1）")
+    p_reb_user.add_argument(
+        "--fund-flow-check",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="主力资金复核开关（默认启用；--no-fund-flow-check 关闭）",
+    )
+    p_reb_user.add_argument(
+        "--fund-flow-check-mode",
+        choices=["auto", "meta_only"],
+        default="auto",
+        help="主力资金复核模式：auto=优先 signals.meta.fund_flow，再用 TuShare/Eastmoney；meta_only=只用 signals.meta.fund_flow",
+    )
+    p_reb_user.add_argument("--fund-flow-block-score", type=float, default=0.45, help="主力资金复核：score01 < 该值阻断 buy（默认 0.45）")
+    p_reb_user.add_argument("--fund-flow-warn-score", type=float, default=0.55, help="主力资金复核：score01 < 该值警告（默认 0.55）")
+    p_reb_user.add_argument("--returns-cache-dir", default=None, help="相关性/分散用的日线缓存目录（默认 data/cache；会按 asset 分子目录）")
     p_reb_user.add_argument(
         "--diversify",
         action=argparse.BooleanOptionalAction,
@@ -588,6 +629,43 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--scan-left-strategy", default="left_dip_rr", help="左侧 scan-strategy 的策略 key（默认 left_dip_rr）")
     p_run.add_argument("--scan-left-top-k", type=int, default=30, help="左侧候选输出 TopK（默认 30）")
     p_run.add_argument("--scan-stock", action=argparse.BooleanOptionalAction, default=False, help="额外跑一份 stock 的 scan-strategy 并写入 report（默认关闭）")
+    p_run.add_argument(
+        "--merge-stock-signals",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="scan-stock 时把 signals_stock 合并进 signals.json 供 rebalance-user 使用（默认启用；--no-merge-stock-signals 关闭）",
+    )
+    p_run.add_argument(
+        "--core-satellite",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="ETF+stock 混合时启用核心+卫星（默认启用；--no-core-satellite 关闭；传给 rebalance-user）",
+    )
+    p_run.add_argument(
+        "--national-team-guard",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="启用国家队 proxy 风险过滤（默认启用；--no-national-team-guard 关闭；传给 rebalance-user）",
+    )
+    p_run.add_argument("--national-team-min-score", type=float, default=0.40, help="国家队风险过滤：risk_off 阈值（默认 0.40）")
+    p_run.add_argument("--national-team-warn-score", type=float, default=0.55, help="国家队风险过滤：caution 阈值（默认 0.55）")
+    p_run.add_argument("--national-team-scale-low", type=float, default=0.35, help="risk_off 时最大仓位缩放比例（默认 0.35）")
+    p_run.add_argument("--national-team-scale-mid", type=float, default=0.70, help="caution 时最大仓位缩放比例（默认 0.70）")
+    p_run.add_argument("--national-team-max-positions-low", type=int, default=1, help="risk_off 时最多持仓数上限（默认 1）")
+    p_run.add_argument(
+        "--fund-flow-check",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="透传给 rebalance-user：主力资金复核开关（默认启用；--no-fund-flow-check 关闭）",
+    )
+    p_run.add_argument(
+        "--fund-flow-check-mode",
+        choices=["auto", "meta_only"],
+        default="auto",
+        help="透传给 rebalance-user：主力资金复核模式（auto/meta_only）",
+    )
+    p_run.add_argument("--fund-flow-block-score", type=float, default=0.45, help="透传给 rebalance-user：主力资金复核阻断阈值（默认 0.45）")
+    p_run.add_argument("--fund-flow-warn-score", type=float, default=0.55, help="透传给 rebalance-user：主力资金复核警告阈值（默认 0.55）")
     p_run.add_argument("--scan-stock-universe", default="hs300", help="stock 股票池（默认 hs300；可选 hs300/index:000300/all）")
     p_run.add_argument("--scan-stock-limit", type=int, default=300, help="stock 扫描数量（默认 300；0=不限制）")
     p_run.add_argument("--scan-stock-top-k", type=int, default=30, help="stock 输出 TopK（默认 30）")
@@ -1008,6 +1086,22 @@ def build_parser() -> argparse.ArgumentParser:
     p_dd.add_argument("--out", default=None, help="输出 JSON 路径（默认打印到 stdout）")
     p_dd.set_defaults(func=cmd_data_doctor)
 
+    p_vp = sub.add_parser("verify-prices", help="校验涨幅口径/复权差异")
+    p_vp.add_argument("--asset", choices=["etf", "index", "stock"], required=True, help="数据类型：etf / index / stock")
+    p_vp.add_argument("--symbol", required=True, help="代码或名称（建议带前缀如 sh600426）")
+    p_vp.add_argument(
+        "--source",
+        choices=["auto", "akshare", "tushare"],
+        default="auto",
+        help="数据源：auto(优先TuShare)/akshare/tushare",
+    )
+    p_vp.add_argument("--basis", default="raw", help="主口径：raw/qfq/hfq（默认 raw）")
+    p_vp.add_argument("--compare", default=None, help="对比口径：raw/qfq/hfq（可选）")
+    p_vp.add_argument("--threshold", type=float, default=0.015, help="对比阈值（默认 0.015=1.5%）")
+    p_vp.add_argument("--cache-dir", default=None, help="缓存目录（默认 data/cache/<asset>）")
+    p_vp.add_argument("--cache-ttl-hours", type=float, default=24.0, help="缓存 TTL 小时（默认 24）")
+    p_vp.set_defaults(func=cmd_verify_prices)
+
     p_fr = sub.add_parser("factor-research", help="Phase1：因子研究最小闭环（IC/IR/衰减/成本/交易性）")
     p_fr.add_argument("--asset", choices=["etf", "stock", "index"], required=True, help="研究对象：etf/stock/index")
     p_fr.add_argument("--freq", choices=["daily", "weekly"], default="daily", help="研究频率（默认 daily）")
@@ -1089,6 +1183,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_mon.add_argument("--exclude-cmds", default="", help="排除哪些 cmd（逗号分隔；默认空）")
     p_mon.add_argument("--out-dir", default=None, help="输出目录（默认 outputs/monitor_YYYYMMDD；同日重复自动加后缀）")
     p_mon.set_defaults(func=cmd_monitor)
+
+    p_brief = sub.add_parser("daily-brief", help="生成每日量化简报（候选池/模拟持仓/执行草案；研究用途）")
+    p_brief.add_argument("--run-dir", required=True, help="run 输出目录（例如 outputs/run_YYYYMMDD_close）")
+    p_brief.add_argument("--out", default=None, help="输出 Markdown 路径（默认 outputs/agents/daily_brief.md）")
+    p_brief.add_argument("--max-candidates", type=int, default=6, help="候选池数量（默认 6）")
+    p_brief.add_argument("--max-portfolio", type=int, default=3, help="模拟持仓最多标的（默认 3）")
+    p_brief.add_argument("--max-warnings", type=int, default=10, help="最多输出警告条数（默认 10）")
+    p_brief.set_defaults(func=cmd_daily_brief)
 
     p_merge = sub.add_parser("signals-merge", help="合并多份 signals.json（多策略聚合）")
     p_merge.add_argument("--in", dest="inputs", action="append", required=True, help="signals.json 路径（可重复传多次）")

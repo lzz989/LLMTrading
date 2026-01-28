@@ -344,6 +344,9 @@ def cmd_run(args: argparse.Namespace) -> int:
                 _record("scan_etf", exc, note="scan-etf(legacy) 失败；无法产出 signals.json，run 将中止")
                 raise
 
+        # scan-mode 产出后，统一落地默认 signals 路径（后续流程依赖）
+        signals_path = out_dir / "signals.json"
+
         # shadow legacy：稳健切换时，保留一份对照 + 自动生成对齐报告（不影响主流程）。
         if used_scan_mode == "strategy" and shadow_legacy and (not legacy_ok):
             try:
@@ -516,6 +519,91 @@ def cmd_run(args: argparse.Namespace) -> int:
             _record("scan_strategy_stock", exc, note="scan-strategy(stock) 失败（已跳过，不影响 ETF orders/report 主流程）")
             signals_stock_path = None
 
+    # 1.5.5) （可选）合并 stock signals 到 signals.json（给 rebalance-user 用）
+    if signals_stock_path is not None and bool(getattr(args, "merge_stock_signals", True)):
+        try:
+            from ..signals_merge import merge_signals_files
+
+            merged = merge_signals_files([Path(str(signals_path)), Path(str(signals_stock_path))])
+            write_json(out_dir / "signals_merged.json", merged)
+            write_json(out_dir / "signals.json", merged)
+            signals_path = out_dir / "signals.json"
+        except (SystemExit, Exception) as exc:  # noqa: BLE001
+            _record("merge_stock_signals", exc, note="合并 stock signals 失败（已跳过，rebalance 仍使用 ETF signals.json）")
+
+    # 1.5.6) 主线热度（ETF）& 卫星候选（Stock）
+    try:
+        sig_obj = json.loads(Path(str(signals_path)).read_text(encoding="utf-8"))
+        sig_items = sig_obj.get("items") if isinstance(sig_obj, dict) else None
+        sig_items = sig_items if isinstance(sig_items, list) else []
+
+        from ..theme_hotness import (
+            compute_theme_hotness_from_signals,
+            pick_satellite_stocks,
+            render_theme_hotness_md,
+            theme_hotness_to_dict,
+        )
+
+        hot = compute_theme_hotness_from_signals(sig_items, top_n=50, min_score=0.0, max_etfs_per_theme=3)
+        hot_list = theme_hotness_to_dict(hot)
+
+        # 读取市场权限与卫星预算
+        market_access = {}
+        min_sat = None
+        try:
+            u = json.loads(Path(str(holdings_path)).read_text(encoding="utf-8"))
+            tr = (u.get("trade_rules") or {}) if isinstance(u, dict) else {}
+            market_access = (tr.get("market_access") or {}) if isinstance(tr, dict) else {}
+            min_sat = tr.get("satellite_min_trade_notional_yuan") or tr.get("min_trade_notional_yuan")
+        except Exception:  # noqa: BLE001
+            market_access = {}
+            min_sat = None
+
+        if min_sat is None:
+            min_sat = 3000.0
+
+        sat_items: list[dict[str, Any]] = []
+        if signals_stock_path is not None and Path(str(signals_stock_path)).exists():
+            try:
+                stock_obj = json.loads(Path(str(signals_stock_path)).read_text(encoding="utf-8"))
+                stock_items = stock_obj.get("items") if isinstance(stock_obj, dict) else None
+                stock_items = stock_items if isinstance(stock_items, list) else []
+                themes = [x.get("theme") for x in hot_list[:3] if isinstance(x, dict) and x.get("theme")]
+                sat_items = pick_satellite_stocks(
+                    stock_items,
+                    themes=[str(t) for t in themes if t],
+                    market_access=market_access,
+                    min_trade_notional_yuan=float(min_sat),
+                    max_picks=2,
+                )
+            except Exception as exc:  # noqa: BLE001
+                _record("theme_hotness.pick_satellite", exc, note="卫星候选计算失败（已跳过）")
+                sat_items = []
+
+        write_json(
+            out_dir / "theme_hotness.json",
+            {
+                "generated_at": datetime.now().isoformat(),
+                "top_themes": hot_list[:3],
+                "items": hot_list,
+            },
+        )
+        write_json(
+            out_dir / "satellite_candidates.json",
+            {
+                "generated_at": datetime.now().isoformat(),
+                "themes": [x.get("theme") for x in hot_list[:3] if isinstance(x, dict)],
+                "candidates": sat_items,
+                "min_trade_notional_yuan": float(min_sat),
+            },
+        )
+
+        note = "主线热度=ETF 信号强度（score）排序；卫星股仅从允许市场中筛选。"
+        md = render_theme_hotness_md(hotness=hot, satellite_candidates=sat_items, note=note)
+        (out_dir / "theme_hotness.md").write_text(md, encoding="utf-8")
+    except Exception as exc:  # noqa: BLE001
+        _record("theme_hotness", exc, note="主线热度模块失败（已跳过）")
+
     # 1.6) （可选）stock 左侧低吸候选：同一次 run 顺手产出（减少你“再戳一次”的体力活）
     signals_left_stock_path: Path | None = None
     if bool(getattr(args, "scan_stock", False)) and bool(getattr(args, "scan_left", True)):
@@ -628,6 +716,10 @@ def cmd_run(args: argparse.Namespace) -> int:
         # 可选模块：失败就记录，主流程继续。
         _record("national_team.invoke", exc, note="national-team 执行失败，已跳过（不影响 orders/report 主流程）")
 
+    nt_path_args: list[str] = []
+    if nt_out.exists():
+        nt_path_args = ["--national-team-path", str(nt_out)]
+
     # 3) rebalance-user：给出次日开盘订单清单
     rebalance_out = out_dir / "rebalance_user.json"
     _invoke(
@@ -636,7 +728,7 @@ def cmd_run(args: argparse.Namespace) -> int:
             "--path",
             str(holdings_path),
             "--signals",
-            str(out_dir / "signals.json"),
+            str(signals_path),
             "--mode",
             str(reb_mode),
             "--regime-index",
@@ -660,8 +752,27 @@ def cmd_run(args: argparse.Namespace) -> int:
             "--out",
             str(rebalance_out),
         ]
+        + nt_path_args
         + ([] if bool(regime_canary) else ["--no-regime-canary"])
         + ([] if bool(getattr(args, "halt_vol_zero", True)) else ["--no-halt-vol-zero"])
+        + ([] if bool(getattr(args, "core_satellite", True)) else ["--no-core-satellite"])
+        + ([] if bool(getattr(args, "national_team_guard", True)) else ["--no-national-team-guard"])
+        + ([] if bool(getattr(args, "fund_flow_check", True)) else ["--no-fund-flow-check"])
+        + (
+            ["--fund-flow-check-mode", str(getattr(args, "fund_flow_check_mode"))]
+            if getattr(args, "fund_flow_check_mode", None) is not None
+            else []
+        )
+        + (
+            ["--fund-flow-block-score", str(getattr(args, "fund_flow_block_score"))]
+            if getattr(args, "fund_flow_block_score", None) is not None
+            else []
+        )
+        + (
+            ["--fund-flow-warn-score", str(getattr(args, "fund_flow_warn_score"))]
+            if getattr(args, "fund_flow_warn_score", None) is not None
+            else []
+        )
         + (
             ["--max-exposure-pct", str(getattr(args, "max_exposure_pct"))]
             if getattr(args, "max_exposure_pct", None) is not None
@@ -685,6 +796,31 @@ def cmd_run(args: argparse.Namespace) -> int:
         + (
             ["--max-corr", str(getattr(args, "max_corr"))]
             if getattr(args, "max_corr", None) is not None
+            else []
+        )
+        + (
+            ["--national-team-min-score", str(getattr(args, "national_team_min_score"))]
+            if getattr(args, "national_team_min_score", None) is not None
+            else []
+        )
+        + (
+            ["--national-team-warn-score", str(getattr(args, "national_team_warn_score"))]
+            if getattr(args, "national_team_warn_score", None) is not None
+            else []
+        )
+        + (
+            ["--national-team-scale-low", str(getattr(args, "national_team_scale_low"))]
+            if getattr(args, "national_team_scale_low", None) is not None
+            else []
+        )
+        + (
+            ["--national-team-scale-mid", str(getattr(args, "national_team_scale_mid"))]
+            if getattr(args, "national_team_scale_mid", None) is not None
+            else []
+        )
+        + (
+            ["--national-team-max-positions-low", str(getattr(args, "national_team_max_positions_low"))]
+            if getattr(args, "national_team_max_positions_low", None) is not None
             else []
         )
     )

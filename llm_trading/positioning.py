@@ -138,7 +138,25 @@ def _infer_theme(name: str) -> str:
     return "other"
 
 
-def _load_weekly_returns_from_cache(*, symbol: str, cache_dir: Path, window_weeks: int) -> list[float] | None:
+def _item_asset(it: dict[str, Any], *, default: str) -> str:
+    a = str(it.get("asset") or default).strip().lower()
+    if a in {"etf", "stock", "index", "crypto"}:
+        return a
+    return str(default or "etf").strip().lower() or "etf"
+
+
+def _resolve_returns_cache_dir(*, base_dir: Path, asset: str) -> Path:
+    a = str(asset or "").strip().lower() or "etf"
+    base = Path(str(base_dir))
+    if base.name == a:
+        return base
+    cand = base / a
+    if cand.exists():
+        return cand
+    return base
+
+
+def _load_weekly_returns_from_cache(*, symbol: str, asset: str, cache_dir: Path, window_weeks: int) -> list[float] | None:
     """
     从本地缓存读取日线 → 转周线 → 计算周收益序列（pct_change）。
 
@@ -153,7 +171,8 @@ def _load_weekly_returns_from_cache(*, symbol: str, cache_dir: Path, window_week
     if not sym:
         return None
     adjust = "qfq"
-    path = cache_dir / f"etf_{sym}_{adjust}.csv"
+    asset2 = str(asset or "etf").strip().lower() or "etf"
+    path = cache_dir / f"{asset2}_{sym}_{adjust}.csv"
     if not path.exists():
         return None
 
@@ -235,10 +254,10 @@ def build_etf_position_plan(
     params: PositionPlanParams,
 ) -> dict[str, Any]:
     """
-    把 top_bbb.json 的候选列表变成“明天买多少 + 止损线”的计划（研究用途）。
+    把候选列表变成“明天买多少 + 止损线”的计划（研究用途）。
 
     注意：
-    - 只做 ETF（默认 lot=100）
+    - 默认以 ETF 口径解释；若 item 里带 asset=stock，将按 stock 的缓存文件读取相关性（lot 仍默认=100）
     - entry 用当前 close 近似（实际你是次日开盘成交，自己再估一下滑点）
     - stop 选一个“硬止损价位”：bull/neutral 通常用周线 entry_ma；bear 用日线 MA20 更紧
       - 也可手动选 stop_mode=atr：用 ATR 做波动自适应止损（更像“风险一致”的仓位）
@@ -293,13 +312,18 @@ def build_etf_position_plan(
     if div_max_corr > 1:
         div_max_corr = 1.0
 
-    returns_cache_dir = Path(str(getattr(params, "returns_cache_dir", "") or "").strip()) if getattr(params, "returns_cache_dir", None) else (Path("data") / "cache" / "etf")
+    returns_cache_root = (
+        Path(str(getattr(params, "returns_cache_dir", "") or "").strip())
+        if getattr(params, "returns_cache_dir", None)
+        else (Path("data") / "cache")
+    )
     max_per_theme = max(0, int(getattr(params, "max_per_theme", 0) or 0))
 
     plans: list[dict[str, Any]] = []
     watch: list[dict[str, Any]] = []
 
     selected_returns: dict[str, list[float]] = {}
+    returns_dir_by_asset: dict[str, Path] = {}
     theme_counts: dict[str, int] = {}
     corr_pairs: list[dict[str, Any]] = []
 
@@ -318,7 +342,9 @@ def build_etf_position_plan(
             "daily_ma20": (stop_d, "日线MA20"),
         }
 
-    def _try_one(it: dict[str, Any], *, mode: StopMode, remaining_yuan: float) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    def _try_one(
+        it: dict[str, Any], *, asset: str, mode: StopMode, remaining_yuan: float
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
         sym = str(it.get("symbol") or "").strip()
         name = str(it.get("name") or "").strip()
         entry = _to_float(it.get("close"))
@@ -343,11 +369,31 @@ def build_etf_position_plan(
             st, st_ref = stop_candidates(it)[mode]
 
         if not sym or entry is None or entry <= 0 or st is None or st <= 0 or st >= entry:
-            return None, {"symbol": sym, "name": name, "ok": False, "reason": "缺entry/stop或stop>=entry", "entry": entry, "stop": st, "stop_ref": st_ref, "stop_mode": mode}
+            return None, {
+                "asset": asset,
+                "symbol": sym,
+                "name": name,
+                "ok": False,
+                "reason": "缺entry/stop或stop>=entry",
+                "entry": entry,
+                "stop": st,
+                "stop_ref": st_ref,
+                "stop_mode": mode,
+            }
 
         stop_pct = (entry - st) / entry
         if stop_pct <= 0:
-            return None, {"symbol": sym, "name": name, "ok": False, "reason": "止损距离<=0", "entry": entry, "stop": st, "stop_ref": st_ref, "stop_mode": mode}
+            return None, {
+                "asset": asset,
+                "symbol": sym,
+                "name": name,
+                "ok": False,
+                "reason": "止损距离<=0",
+                "entry": entry,
+                "stop": st,
+                "stop_ref": st_ref,
+                "stop_mode": mode,
+            }
 
         raw_pos_yuan = risk_yuan / float(stop_pct)
         want_yuan = min(float(raw_pos_yuan), float(remaining_yuan), float(cap))
@@ -358,6 +404,7 @@ def build_etf_position_plan(
 
         if shares <= 0 or pos_yuan <= 0:
             return None, {
+                "asset": asset,
                 "symbol": sym,
                 "name": name,
                 "ok": False,
@@ -376,6 +423,7 @@ def build_etf_position_plan(
             need_yuan2 = float(need_shares) * float(entry)
             need_risk = float(need_yuan2) * float(stop_pct)
             return None, {
+                "asset": asset,
                 "symbol": sym,
                 "name": name,
                 "ok": False,
@@ -395,6 +443,7 @@ def build_etf_position_plan(
         actual_risk_yuan = float(pos_yuan) * float(stop_pct)
         return (
             {
+                "asset": asset,
                 "symbol": sym,
                 "name": name,
                 "ok": True,
@@ -418,39 +467,52 @@ def build_etf_position_plan(
     for it in (items or []):
         sym0 = str(it.get("symbol") or "").strip()
         name0 = str(it.get("name") or "").strip()
+        asset0 = _item_asset(it, default="etf")
         if not sym0:
             continue
+
+        key0 = f"{asset0}:{sym0}"
+        if asset0 not in returns_dir_by_asset:
+            returns_dir_by_asset[asset0] = _resolve_returns_cache_dir(base_dir=returns_cache_root, asset=asset0)
 
         # 同主题限仓（可选）
         theme = _infer_theme(name0)
         if max_per_theme > 0 and int(theme_counts.get(theme, 0)) >= int(max_per_theme):
-            watch.append({"symbol": sym0, "name": name0, "ok": False, "reason": f"同主题限仓({theme})", "theme": theme})
+            watch.append({"asset": asset0, "symbol": sym0, "name": name0, "ok": False, "reason": f"同主题限仓({theme})", "theme": theme})
             continue
 
         # 相关性过滤（可选）：跟已选的过于相关就跳过
         if div_enabled and div_max_corr < 0.999 and len(plans) >= 1:
-            cur_ret = selected_returns.get(sym0)
+            cur_ret = selected_returns.get(key0)
             if cur_ret is None:
-                cur_ret = _load_weekly_returns_from_cache(symbol=sym0, cache_dir=returns_cache_dir, window_weeks=div_window)
+                cur_ret = _load_weekly_returns_from_cache(
+                    symbol=sym0,
+                    asset=asset0,
+                    cache_dir=returns_dir_by_asset[asset0],
+                    window_weeks=div_window,
+                )
                 if cur_ret is not None:
-                    selected_returns[sym0] = cur_ret
+                    selected_returns[key0] = cur_ret
             if cur_ret is not None:
                 worst = None
                 too_corr = False
-                for psym, pret in selected_returns.items():
-                    if psym == sym0 or pret is None:
+                for pkey, pret in selected_returns.items():
+                    if pkey == key0 or pret is None:
                         continue
                     c = _corr_abs_tail(cur_ret, pret, min_overlap=div_min_overlap)
                     if c is None:
                         continue
                     if worst is None or float(c) > float(worst.get("corr_abs") or 0.0):
-                        worst = {"a": sym0, "b": psym, "corr_abs": float(c)}
+                        a_asset = asset0
+                        b_asset, b_sym = pkey.split(":", 1) if ":" in pkey else ("", pkey)
+                        worst = {"a": sym0, "a_asset": a_asset, "b": b_sym, "b_asset": b_asset, "corr_abs": float(c)}
                     if float(c) >= float(div_max_corr):
                         too_corr = True
                         break
                 if too_corr:
                     watch.append(
                         {
+                            "asset": asset0,
                             "symbol": sym0,
                             "name": name0,
                             "ok": False,
@@ -461,7 +523,7 @@ def build_etf_position_plan(
                     )
                     continue
 
-        plan, diag = _try_one(it, mode=stop_mode, remaining_yuan=remaining)
+        plan, diag = _try_one(it, asset=asset0, mode=stop_mode, remaining_yuan=remaining)
         if plan is None:
             # fallback：如果主 stop 不可用/仓位太碎，尝试其它 stop（不然小资金基本没法玩）
             alts: list[StopMode] = []
@@ -476,7 +538,7 @@ def build_etf_position_plan(
             ok_alt = False
             best_diag = diag
             for alt in alts:
-                plan2, diag2 = _try_one(it, mode=alt, remaining_yuan=remaining)
+                plan2, diag2 = _try_one(it, asset=asset0, mode=alt, remaining_yuan=remaining)
                 if plan2 is not None:
                     plan2["notes"] = str(plan2.get("notes") or "") + f"；注意：原本计划用 {stop_mode}，但因仓位/磨损约束改用 {alt}"
                     plans.append(plan2)
@@ -498,21 +560,27 @@ def build_etf_position_plan(
         plans.append(plan)
         theme_counts[theme] = int(theme_counts.get(theme, 0)) + 1
         # 保存 returns（用于后续相关性计算）
-        if div_enabled and sym0 not in selected_returns:
-            cur_ret = _load_weekly_returns_from_cache(symbol=sym0, cache_dir=returns_cache_dir, window_weeks=div_window)
+        if div_enabled and key0 not in selected_returns:
+            cur_ret = _load_weekly_returns_from_cache(
+                symbol=sym0,
+                asset=asset0,
+                cache_dir=returns_dir_by_asset[asset0],
+                window_weeks=div_window,
+            )
             if cur_ret is not None:
-                selected_returns[sym0] = cur_ret
+                selected_returns[key0] = cur_ret
         # 记录 pairwise corr（仅记录新加入与已选的关系）
         if div_enabled:
-            cur_ret = selected_returns.get(sym0)
+            cur_ret = selected_returns.get(key0)
             if cur_ret is not None:
-                for psym, pret in selected_returns.items():
-                    if psym == sym0 or pret is None:
+                for pkey, pret in selected_returns.items():
+                    if pkey == key0 or pret is None:
                         continue
                     c = _corr_abs_tail(cur_ret, pret, min_overlap=div_min_overlap)
                     if c is None:
                         continue
-                    corr_pairs.append({"a": sym0, "b": psym, "corr_abs": float(c)})
+                    b_asset, b_sym = pkey.split(":", 1) if ":" in pkey else ("", pkey)
+                    corr_pairs.append({"a": sym0, "a_asset": asset0, "b": b_sym, "b_asset": b_asset, "corr_abs": float(c)})
 
         remaining -= float(plan.get("position_yuan") or 0.0)
         picked += 1
@@ -526,7 +594,8 @@ def build_etf_position_plan(
         "market_regime_label": str(profile.label),
         "diversification": {
             "enabled": bool(div_enabled),
-            "returns_cache_dir": str(returns_cache_dir),
+            "returns_cache_dir": str(returns_cache_root),
+            "returns_cache_dir_by_asset": {k: str(v) for k, v in returns_dir_by_asset.items()},
             "window_weeks": int(div_window),
             "min_overlap_weeks": int(div_min_overlap),
             "max_abs_corr": float(div_max_corr),
@@ -559,3 +628,26 @@ def build_etf_position_plan(
         "watch": watch[:50],
         "disclaimer": "研究工具输出，不构成投资建议；买卖自负。",
     }
+
+
+def build_stock_position_plan(
+    *,
+    items: list[dict[str, Any]],
+    market_regime_label: str | None,
+    params: PositionPlanParams,
+) -> dict[str, Any]:
+    """
+    股票仓位计划（研究用途）。
+
+    说明：
+    - 逻辑与 build_etf_position_plan 保持一致；只是默认把 item.asset 兜底为 stock。
+    """
+    items2: list[dict[str, Any]] = []
+    for it in items or []:
+        if not isinstance(it, dict):
+            continue
+        it2 = dict(it)
+        if not it2.get("asset"):
+            it2["asset"] = "stock"
+        items2.append(it2)
+    return build_etf_position_plan(items=items2, market_regime_label=market_regime_label, params=params)
