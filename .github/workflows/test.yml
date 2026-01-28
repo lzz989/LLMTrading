@@ -7,6 +7,10 @@ on:
 jobs:
   smoke:
     runs-on: ubuntu-latest
+    env:
+      # Don't rely on .venv in CI; use the toolchain python installed by setup-python.
+      PYTHON: python
+      COVERAGE_FAIL_UNDER: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -15,6 +19,10 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+          cache: "pip"
+          cache-dependency-path: |
+            requirements.txt
+            requirements-dev.txt
 
       - name: Install Dependencies
         run: |
@@ -23,4 +31,4 @@ jobs:
 
       - name: Coverage (compileall + unittest + report)
         run: |
-          PYTHON=python bash scripts/coverage.sh
+          bash scripts/coverage.sh
