@@ -81,12 +81,27 @@
 - 复制 `.env.example` 为 `.env`，填 `OPENAI_API_KEY` 和 `OPENAI_MODEL`
 - 如果你用 OpenAI 兼容中转站（new api 之类）：把 `OPENAI_BASE_URL` 改成你的中转站地址（支持 `https://xxx` 或 `https://xxx/v1`）
 - ⚠️ **公开仓库强约束**：推送前先跑 `bash scripts/sensitive_scan.sh`（CI 也会跑；只打印文件名，不打印密钥内容）
+- ⚠️ **历史污染处理**：如果你怀疑“以前已经把密钥/私有代理地址推上 GitHub”，别嘴硬，先**立刻轮换密钥**，再做一次“清历史 + force push”（见下方《公开仓库：清历史》）
 
 2.5)（可选）配置 Gemini（如果你要在 Web/UI 里拿它做“综合自然语言解读”）：
 
 - 同样在 `.env` 里填：`GEMINI_API_KEY`、`GEMINI_MODEL`
 - `GEMINI_MODEL` 例子：`gemini-2.0-flash` / `gemini-1.5-flash`（以你账号可用为准）
 - 如果你用中转站：把 `GEMINI_BASE_URL` 改成你的代理地址，并按需把 `GEMINI_API_KEY_MODE` 改成 `authorization`
+
+### 公开仓库：清历史（清掉已经推上去的密钥/私有地址）
+
+艹，这个事别侥幸：**你一旦推过密钥，最先做的是轮换密钥**，不是删文件假装无事发生。
+
+1) 立刻在对应平台（OpenAI/Gemini/TuShare/代理商）**轮换密钥**  
+2) 确保当前工作区不再包含敏感信息：  
+   - `bash scripts/sensitive_scan.sh` 必须通过  
+3) 清历史 + force push（重写 Git 历史，把旧提交里的密钥彻底变成不可达对象）  
+   - 推荐：`git filter-repo`（更快、更稳；没装就自己装一下）  
+   - 兜底：`git filter-branch`（自带但更慢；本仓库历史很短，够用）  
+4) 推送：`git push --force-with-lease origin main`
+
+> 注意：GitHub 仍可能缓存旧对象一段时间；如果是严重泄露，按平台安全流程处理，必要时联系 GitHub Support。
 
 3) 运行（先不启用 LLM，保证流程能跑通）：
 
