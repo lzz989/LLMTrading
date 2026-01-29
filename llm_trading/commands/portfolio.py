@@ -1063,10 +1063,22 @@ def cmd_rebalance_user(args: argparse.Namespace) -> int:
         etf_sorted = [it for _, it in sorted(list(enumerate(etf_items)), key=lambda kv: _rank_key(kv[1], kv[0]))]
         stock_sorted = [it for _, it in sorted(list(enumerate(stock_items)), key=lambda kv: _rank_key(kv[1], kv[0]))]
 
-        core = etf_sorted[:1] if etf_sorted else []
         slots_total = int(max_positions_eff or 0)
         if slots_total <= 0:
-            slots_total = max(1, int(len(core) + len(stock_sorted)))
+            slots_total = max(1, int(len(etf_sorted) + len(stock_sorted)))
+
+        # ETF 核心数量：默认 1；如 user_holdings.trade_rules.max_etf_positions 指定则遵守（上限仍受 slots_total 限制）
+        max_etf_positions_eff = 1
+        try:
+            raw = rules.get("max_etf_positions")
+            v = int(raw) if raw is not None else 1
+            max_etf_positions_eff = int(v) if int(v) > 0 else 1
+        except (TypeError, ValueError, OverflowError, AttributeError):  # noqa: BLE001
+            max_etf_positions_eff = 1
+        max_etf_positions_eff = max(1, min(int(max_etf_positions_eff), int(slots_total)))
+
+        core_n = int(max_etf_positions_eff) if etf_sorted else 0
+        core = etf_sorted[: int(core_n)] if int(core_n) > 0 else []
         slots_left = max(0, int(slots_total) - int(len(core)))
         satellites = stock_sorted[: int(slots_left)] if stock_sorted else []
 
@@ -2081,6 +2093,60 @@ def cmd_rebalance_user(args: argparse.Namespace) -> int:
             buy_turnover_used_yuan += float(buy_sh) * float(entry)
             exposure_buy_used_yuan += float(buy_sh) * float(entry)
 
+    # 仓位超限：
+    # - 不强制清仓（尊重用户“自然离场”的节奏）
+    # - 但禁止“新增标的”的买入单，避免越加越乱
+    # - 对“已有持仓的加仓”不做一刀切（仍会被 max_exposure/max_position_pct 等约束卡住）
+    block_new_entries = False
+    blocked_buy_orders = 0
+    try:
+        current_positions_n = int(len(holdings or []))
+    except Exception:  # noqa: BLE001
+        current_positions_n = 0
+    try:
+        max_positions_cap = int(max_positions_eff or 0) if max_positions_eff is not None else 0
+    except Exception:  # noqa: BLE001
+        max_positions_cap = 0
+    if int(max_positions_cap) > 0 and int(current_positions_n) > int(max_positions_cap):
+        block_new_entries = True
+        held_syms: set[str] = set()
+        try:
+            for h in (holdings or []):
+                if not isinstance(h, dict):
+                    continue
+                s = str(h.get("symbol") or "").strip()
+                if s:
+                    held_syms.add(s)
+        except Exception:  # noqa: BLE001
+            held_syms = set()
+        try:
+            blocked_buy_orders = int(
+                sum(
+                    1
+                    for o in (orders or [])
+                    if isinstance(o, dict)
+                    and str(o.get("side") or "").strip().lower() == "buy"
+                    and str(o.get("symbol") or "").strip()
+                    and str(o.get("symbol") or "").strip() not in held_syms
+                )
+            )
+        except Exception:  # noqa: BLE001
+            blocked_buy_orders = 0
+        if blocked_buy_orders > 0:
+            orders = [
+                o
+                for o in orders
+                if not (
+                    isinstance(o, dict)
+                    and str(o.get("side") or "").strip().lower() == "buy"
+                    and str(o.get("symbol") or "").strip()
+                    and str(o.get("symbol") or "").strip() not in held_syms
+                )
+            ]
+        warnings.append(
+            f"仓位约束：current_positions={current_positions_n} > max_positions={max_positions_cap}（不强制卖出；已禁止新增标的买入，blocked_new_buys={blocked_buy_orders}）"
+        )
+
     out = sanitize_for_json(
         {
             "generated_at": datetime.now().isoformat(),
@@ -2113,7 +2179,10 @@ def cmd_rebalance_user(args: argparse.Namespace) -> int:
                     "limit_down_pct": float(getattr(tb_cfg, "limit_down_pct", 0.0)),
                     "halt_vol_zero": bool(getattr(tb_cfg, "halt_vol_zero", True)),
                     "min_trade_notional_yuan": float(min_trade_notional_yuan or 0.0),
+                    "current_positions": int(current_positions_n),
                     "max_positions": int(max_positions_eff) if max_positions_eff is not None else None,
+                    "block_new_entries": bool(block_new_entries),
+                    "blocked_buy_orders": int(blocked_buy_orders) if int(blocked_buy_orders) > 0 else None,
                     "max_position_pct": float(max_position_pct_eff) if max_position_pct_eff is not None else None,
                     "max_turnover_pct_buy_side": float(max_turnover_pct) if max_turnover_pct > 0 else None,
                     "core_satellite": core_satellite_summary,

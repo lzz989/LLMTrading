@@ -80,6 +80,7 @@
 
 - 复制 `.env.example` 为 `.env`，填 `OPENAI_API_KEY` 和 `OPENAI_MODEL`
 - 如果你用 OpenAI 兼容中转站（new api 之类）：把 `OPENAI_BASE_URL` 改成你的中转站地址（支持 `https://xxx` 或 `https://xxx/v1`）
+- ⚠️ **公开仓库强约束**：推送前先跑 `bash scripts/sensitive_scan.sh`（CI 也会跑；只打印文件名，不打印密钥内容）
 
 2.5)（可选）配置 Gemini（如果你要在 Web/UI 里拿它做“综合自然语言解读”）：
 
@@ -517,6 +518,34 @@ BBB 稳健性评估（**walk-forward + 参数敏感性**；研究用途）：
 
 输出里会附一段 `portfolio`（组合层汇总）：现金/仓位、单票&主题集中度、粗粒度相关性（周收益）、到“effective_stop”的风险金额等。
 （注意：相关性需要本地缓存里有对应标的 CSV；第一次跑会自动落盘。）
+
+### 筹码结构（VBP 等价代理：上方筹码墙 / 获利盘 / 集中度）
+
+仓库里“筹码”只做两件事：**看上方筹码墙（阻力/套牢盘压力）**，以及给一个“结构是否健康”的二级证据。
+
+重要声明（先写死，别指望它当圣杯）：
+
+- 这是 **公开 OHLCV 的近似**，不是交易所级别的真实成本分布；只能当过滤器/参考位。
+- ETF 默认只有 `VBP`（成交量按价格分布），股票在拿得到 `turnover_rate` 时才会额外算一份 `cost`（换手率驱动的成本分布近似）。
+
+你会在两处看到它：
+
+- `outputs/run_*/holdings_user.json`：每个持仓里有 `chip.vbp` /（可选）`chip.cost`
+- `signals.json`（scan-strategy 输出）：每个候选的 `meta.chip_vbp`（用于 entry 过滤，**只降不升**）
+
+`chip.vbp` 常用字段（0~1 都是“占比”，越大越强）：
+
+- `loss_proxy_pct`（= `overhead_supply_pct`）：上方“套牢盘/筹码墙”代理（越大=越难一口气拉过去）
+- `overhead_near_pct_10`：近 10% 上方筹码墙（更贴近短周期）
+- `resistance_dist_pct`：最近阻力离当前价的距离（越小=越容易顶到墙）
+- `profit_proxy_pct`（= `support_pct`）：下方“获利盘”代理（越大=越多筹码在盈利/支撑更厚）
+- `concentration_top3`：筹码集中度代理（越大=成交更集中在少数价位 bin；“筹码峰更尖”）
+
+使用建议（按你的“回踩低吸/不追高”风格）：
+
+- **不拿它当买点**；它只负责回答：现在买会不会立刻撞墙？止损能不能放得近？
+- `resistance_dist_pct` 很小且 `overhead_near_pct_10` 很大：赔率差，宁可等回踩/等确认。
+- `profit_proxy_pct` 高 + `overhead_*` 低：结构更“干净”，更适合做右侧回踩。
 
 ```bash
 ".venv/bin/python" -m llm_trading holdings-user

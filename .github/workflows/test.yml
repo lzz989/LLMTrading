@@ -29,6 +29,10 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt -r requirements-dev.txt
 
+      - name: Sensitive Scan (public repo guard)
+        run: |
+          bash scripts/sensitive_scan.sh
+
       - name: Coverage (compileall + unittest + report)
         run: |
           bash scripts/coverage.sh

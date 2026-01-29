@@ -353,10 +353,91 @@ def analyze_holdings(
             except (AttributeError):  # noqa: BLE001
                 df["amount"] = None
 
+        # === 筹码结构（研究用途）===
+        # - VBP：用 OHLCV 近似“套牢盘/筹码峰/支撑阻力”
+        # - Cost（可选）：用 turnover_rate(换手率) 近似“成本分布”（更像软件筹码峰）
+        # 重要：筹码是二级证据/过滤器，不是买卖按钮；拿不到数据就降级。
+        chip: dict[str, Any] | None = None
+        try:
+            from .chip import ChipCostParams, ChipVbpParams, compute_turnover_cost_distribution, compute_volume_by_price
+
+            df_chip = df
+            # 股票优先用“未复权(raw)”做筹码（更贴近真实成交成本）；拿不到就回退当前 df
+            if asset == "stock":
+                try:
+                    df_raw = fetch_daily_cached(
+                        FetchParams(asset=asset, symbol=sym, adjust="", source="auto"),
+                        cache_dir=cache_dir,
+                        ttl_hours=float(cache_ttl_hours),
+                    )
+                    df_raw = df_raw.dropna(subset=["date", "close"]).sort_values("date").reset_index(drop=True)
+                    if df_raw is not None and (not getattr(df_raw, "empty", True)):
+                        # 补齐字段（别让源站脏数据把筹码模块炸了）
+                        if "high" not in df_raw.columns:
+                            df_raw["high"] = df_raw["close"]
+                        if "low" not in df_raw.columns:
+                            df_raw["low"] = df_raw["close"]
+                        if "open" not in df_raw.columns:
+                            df_raw["open"] = df_raw["close"]
+                        if "volume" not in df_raw.columns:
+                            df_raw["volume"] = 0.0
+                        df_chip = df_raw
+                except Exception:  # noqa: BLE001
+                    df_chip = df
+
+            vbp = compute_volume_by_price(df_chip, params=ChipVbpParams())
+
+            chip_cost = None
+            if asset == "stock":
+                try:
+                    from .tushare_daily_basic import fetch_turnover_rate_cached
+
+                    start_date = None
+                    end_date = None
+                    try:
+                        start_date = df_chip["date"].iloc[0]
+                        end_date = df_chip["date"].iloc[-1]
+                    except Exception:  # noqa: BLE001
+                        start_date = None
+                        end_date = None
+
+                    pack = fetch_turnover_rate_cached(
+                        symbol=str(sym),
+                        cache_dir=Path("data") / "cache" / "stock_basic",
+                        ttl_hours=float(cache_ttl_hours),
+                        start_date=(start_date.strftime("%Y%m%d") if hasattr(start_date, "strftime") else None),
+                        end_date=(end_date.strftime("%Y%m%d") if hasattr(end_date, "strftime") else None),
+                    )
+                    if pack.ok and pack.df is not None and (not getattr(pack.df, "empty", True)):
+                        try:
+                            # date 对齐（每天一条）；缺失换手率则 chip_cost=None
+                            df_chip2 = df_chip.merge(pack.df, on="date", how="left")
+                            chip_cost = compute_turnover_cost_distribution(df_chip2, params=ChipCostParams())
+                        except Exception:  # noqa: BLE001
+                            chip_cost = None
+                except Exception:  # noqa: BLE001
+                    chip_cost = None
+
+            if vbp is not None or chip_cost is not None:
+                chip = {
+                    "ok": True,
+                    "as_of": None,  # 下面统一填 asof_str
+                    "vbp": vbp,
+                    "cost": chip_cost,
+                    "note": "筹码结构=VBP(成交量分布) + 可选成本分布(换手率近似)；用于入场过滤/阻力位启发式。",
+                }
+        except Exception:  # noqa: BLE001
+            chip = None
+
         last = df.iloc[-1]
         asof = last.get("date")
         asof_str = asof.strftime("%Y-%m-%d") if hasattr(asof, "strftime") else str(asof)
         close = fnum(last.get("close"))
+        if isinstance(chip, dict):
+            chip = dict(chip)
+            chip["as_of"] = asof_str
+        elif chip is None:
+            chip = {"ok": False, "as_of": asof_str, "vbp": None, "cost": None}
 
         close_s = pd.to_numeric(df["close"], errors="coerce").astype(float)
         ma20_s = close_s.rolling(20, min_periods=20).mean()
@@ -815,6 +896,7 @@ def analyze_holdings(
                     "ref": tp_ref,
                     "stop": tp_stop,
                 },
+                "chip": chip,
                 "status": status,
             }
         )

@@ -387,7 +387,9 @@ def cmd_scan_strategy(args: argparse.Namespace) -> int:
 
         risk_flags: list[str] = []
         if action == "entry":
-            if str(price_basis) != "raw":
+            # 股票：尽量用 raw（更贴近真实成交成本/不被复权误差带偏）
+            # ETF：qfq 是常态（折算/分红/拆分），raw 反而经常拿不到；因此这里只对 stock 严格。
+            if str(asset) == "stock" and str(price_basis) != "raw":
                 risk_flags.append("price_basis_not_raw")
             if str(source) in {"auto", "tushare"} and str(data_source) == "akshare":
                 risk_flags.append("data_source_fallback_akshare")
@@ -395,6 +397,43 @@ def cmd_scan_strategy(args: argparse.Namespace) -> int:
                 risk_flags.append("intraday_unclosed")
             if risk_flags:
                 action = "watch"
+
+        # === 筹码结构（VBP）===
+        # 只用公开 OHLCV 做“套牢盘压力/筹码峰”近似：
+        # - 用于：入场过滤（避免刚买就撞上方大压力） + 给出上方阻力位参考
+        chip_vbp = None
+        try:
+            from ..chip import ChipVbpParams, compute_volume_by_price
+
+            df_chip0 = df_price_raw if (df_price_raw is not None and (not getattr(df_price_raw, "empty", True))) else df_d2
+            df_chip0 = _ensure_ohlcv(df_chip0)
+            # window_days: 别太长，避免被上古成交量污染；但也别太短，避免被一两天放量骗
+            chip_vbp = compute_volume_by_price(df_chip0, params=ChipVbpParams(window_days=120, bins=36))
+        except Exception:  # noqa: BLE001
+            chip_vbp = None
+
+        # 筹码过滤：只在 entry 阶段“只降不升”
+        if action == "entry" and isinstance(chip_vbp, dict) and bool(chip_vbp.get("ok")):
+            try:
+                dist = chip_vbp.get("resistance_dist_pct")
+                overhead10 = chip_vbp.get("overhead_near_pct_10")
+                overhead = chip_vbp.get("overhead_supply_pct")
+                # 1) 最近阻力离得太近 + 近10%上方筹码偏厚：赔率差，容易被套
+                if dist is not None and overhead10 is not None:
+                    if float(dist) <= 0.03 and float(overhead10) >= 0.30:
+                        risk_flags.append("chip_resistance_too_close")
+                # 2) 上方整体筹码过厚：突破成本高（更像震荡/反复拉扯）
+                if overhead is not None:
+                    if float(overhead) >= 0.65:
+                        risk_flags.append("chip_overhead_heavy")
+            except Exception:  # noqa: BLE001
+                pass
+            if risk_flags:
+                action = "watch"
+                if reason:
+                    reason = f"{reason}；筹码上方压力偏大（已降级为观望）"
+                else:
+                    reason = "筹码上方压力偏大（已降级为观望）"
 
         item = {
             "asset": str(asset),
@@ -422,6 +461,7 @@ def cmd_scan_strategy(args: argparse.Namespace) -> int:
                     "volume_last": vol_last,
                     "volume_avg20": vol_avg20,
                 },
+                "chip_vbp": chip_vbp,
                 "strategy_signal": sig,
                 "as_of": price_as_of or as_of,
                 "signal_as_of": as_of,
