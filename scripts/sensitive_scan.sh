@@ -49,9 +49,12 @@ _check_tracked_glob_nonempty "outputs/*"
 _check_pattern_files_only "sk-[A-Za-z0-9]{20,}" "possible API key (sk-...) found"
 _check_pattern_files_only "BEGIN( RSA)? PRIVATE KEY" "private key block found"
 
-# TuShare proxy tutorial leftovers: forbid numeric hardcode of token & known private domain keywords.
+# TuShare proxy tutorial leftovers: forbid numeric hardcode of token.
 _check_pattern_files_only "pro\\._DataApi__token\\s*=\\s*['\\\"][0-9]{10,}['\\\"]" "hardcoded tushare token found"
-_check_pattern_files_only "xiximiao|aihubproxy" "private proxy domain/keyword found"
+
+# NOTE: Avoid adding a regex lookahead here; git grep -E doesn't support it.
+# If you want to ban a specific private proxy domain, do it in a local (untracked) script,
+# not in a public repo.
 
 if [[ "${fail}" -ne 0 ]]; then
   echo >&2
