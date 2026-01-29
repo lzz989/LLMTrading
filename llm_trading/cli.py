@@ -1097,7 +1097,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_vp.add_argument("--basis", default="raw", help="主口径：raw/qfq/hfq（默认 raw）")
     p_vp.add_argument("--compare", default=None, help="对比口径：raw/qfq/hfq（可选）")
-    p_vp.add_argument("--threshold", type=float, default=0.015, help="对比阈值（默认 0.015=1.5%）")
+    # argparse help 文本内部用 %-format，字面量 % 需要写成 %%
+    p_vp.add_argument("--threshold", type=float, default=0.015, help="对比阈值（默认 0.015=1.5%%）")
     p_vp.add_argument("--cache-dir", default=None, help="缓存目录（默认 data/cache/<asset>）")
     p_vp.add_argument("--cache-ttl-hours", type=float, default=24.0, help="缓存 TTL 小时（默认 24）")
     p_vp.set_defaults(func=cmd_verify_prices)
