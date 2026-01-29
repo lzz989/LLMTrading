@@ -32,7 +32,8 @@ _check_pattern_files_only() {
   local pat="$1"
   local desc="$2"
   local hits
-  hits="$(git grep -lE "${pat}" || true)"
+  # Exclude this script itself to avoid self-matching the regex string literals.
+  hits="$(git grep -lE "${pat}" -- ':!scripts/sensitive_scan.sh' || true)"
   if [[ -n "${hits}" ]]; then
     _err "${desc} (pattern=${pat})"
     echo "${hits}" >&2
@@ -59,4 +60,3 @@ if [[ "${fail}" -ne 0 ]]; then
 fi
 
 echo "Sensitive scan OK."
-
