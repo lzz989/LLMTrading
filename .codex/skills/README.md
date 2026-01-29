@@ -18,6 +18,8 @@
 | `strategy` | 持仓/候选收敛成“可执行动作 + 失效条件”（保命优先） | `outputs/agents/strategy_action.md` | `.codex/skills/strategy/SKILL.md` |
 | `research` | 基本面/行业/技术调研（证据-不确定性）+ 可选抓新闻线索 | `outputs/agents/research.md` | `.codex/skills/research/SKILL.md` |
 | `backtest` | 回测某个规则/参数是否靠谱（严禁未来函数） | `outputs/agents/backtest_report.md` | `.codex/skills/backtest/SKILL.md` |
+| `five_schools` | 五派“教主快评”：先快评筛子，后点名深挖 | `outputs/agents/five_schools.md` | `.codex/skills/five_schools/SKILL.md` |
+| `hotlines` | 主线热度/拥挤度识别（行情驱动，输出主线 TopN） | `outputs/agents/hotlines.md` | `.codex/skills/hotlines/SKILL.md` |
 
 ## 怎么用（最稳的触发方式）
 

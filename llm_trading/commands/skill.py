@@ -712,6 +712,56 @@ def _skill_backtest(args: argparse.Namespace) -> int:
     return 0
 
 
+def _skill_five_schools(args: argparse.Namespace) -> int:
+    from ..skills.five_schools import run_five_schools
+
+    asset = str(getattr(args, "asset", "stock") or "stock").strip().lower()
+    symbols_raw = str(getattr(args, "symbols", "") or "").strip()
+    symbols = [s.strip() for s in symbols_raw.split(",") if s.strip()]
+    if not symbols:
+        raise SystemExit("symbols 为空：用 --symbols sh513050,sh600188")
+
+    run_dir = str(getattr(args, "run_dir", "") or "").strip() or None
+    out_md = str(getattr(args, "out", "") or str(Path("outputs") / "agents" / "five_schools.md")).strip()
+    out_json = str(getattr(args, "out_json", "") or str(Path("outputs") / "agents" / "five_schools.json")).strip()
+    source = str(getattr(args, "source", "auto") or "auto").strip().lower()
+    freq = str(getattr(args, "freq", "weekly") or "weekly").strip().lower()
+
+    res = run_five_schools(
+        asset=asset,
+        symbols=symbols,
+        run_dir=run_dir,
+        out_md=out_md,
+        out_json=out_json,
+        source=source,
+        freq=freq,
+    )
+    print(str(res.out_md.resolve()))
+    return 0
+
+
+def _skill_hotlines(args: argparse.Namespace) -> int:
+    from ..skills.hotlines import run_hotlines
+
+    universe = str(getattr(args, "universe", "") or str(Path("config") / "hotlines_universe.yaml")).strip()
+    out_md = str(getattr(args, "out", "") or str(Path("outputs") / "agents" / "hotlines.md")).strip()
+    out_json = str(getattr(args, "out_json", "") or str(Path("outputs") / "agents" / "hotlines.json")).strip()
+    top_n = int(getattr(args, "top", 10) or 10)
+    source = str(getattr(args, "source", "auto") or "auto").strip().lower()
+    ttl = float(getattr(args, "cache_ttl_hours", 24.0) or 24.0)
+
+    res = run_hotlines(
+        universe_path=universe,
+        out_md=out_md,
+        out_json=out_json,
+        top_n=top_n,
+        source=source,
+        cache_ttl_hours=ttl,
+    )
+    print(str(res.out_md.resolve()))
+    return 0
+
+
 def cmd_skill(args: argparse.Namespace) -> int:
     subcmd = str(getattr(args, "skill_cmd", "") or "").strip().lower()
     if subcmd == "strategy":
@@ -720,4 +770,8 @@ def cmd_skill(args: argparse.Namespace) -> int:
         return _skill_research(args)
     if subcmd == "backtest":
         return _skill_backtest(args)
+    if subcmd == "five_schools":
+        return _skill_five_schools(args)
+    if subcmd == "hotlines":
+        return _skill_hotlines(args)
     raise SystemExit(f"未知 skill 子命令：{subcmd}")

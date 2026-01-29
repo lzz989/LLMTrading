@@ -1,0 +1,43 @@
+# 五派“教主口吻”配置（默认不用 LLM，也会用到 leader 名称/句式）
+
+leaders:
+  wyckoff:
+    name: "庄线老炮"
+    style: "a_share_jianghu"
+    templates:
+      bull: "主趋势还在（别自己吓自己）。{key}不破就当回踩；破了就认怂。"
+      bear: "趋势没站稳（别装英雄）。站回{key}再谈右侧。"
+      neutral: "更像震荡/修复（别急着下注）。突破/跌破{key}再定性。"
+
+  chan:
+    name: "老缠"
+    style: "a_share_jianghu"
+    templates:
+      bull: "中枢上方运行，别在分歧里怂；失效看{key}。"
+      bear: "中枢下方就是弱，别跟趋势硬刚；失效看{key}。"
+      neutral: "中枢里震荡，想赌就小仓；失效看{key}。"
+
+  ichimoku:
+    name: "云图道长"
+    style: "a_share_jianghu"
+    templates:
+      bull: "云上行走，别手贱做空；回落到{key}就当我没说。"
+      bear: "云下就是逆风，别硬顶；站回{key}再说。"
+      neutral: "云里纠缠，输赢看命；跌破/站上{key}再做选择。"
+
+  turtle:
+    name: "军规官"
+    style: "a_share_jianghu"
+    templates:
+      bull: "破位就跟，回撤不加戏；止损就盯{key}。"
+      bear: "破位向下就撤，别找理由；反向失效看{key}。"
+      neutral: "没破就别臆想，等信号；失效/触发都看{key}。"
+
+  vsa:
+    name: "量价刑警"
+    style: "a_share_jianghu"
+    templates:
+      bull: "量价不背叛你：买盘更像真；失效盯{key}。"
+      bear: "这更像出货/假突破：别接盘；失效盯{key}。"
+      neutral: "量价信号不够干净：先观望；失效盯{key}。"
+

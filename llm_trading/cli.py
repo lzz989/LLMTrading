@@ -1238,6 +1238,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_skill_backtest.set_defaults(func=cmd_skill)
 
+    p_skill_five = skill_sub.add_parser("five_schools", help="五派教主快评：威科夫/缠论/一目/海龟/VSA（默认不调用LLM）")
+    p_skill_five.add_argument("--asset", default="stock", choices=["stock", "etf"], help="资产类型（默认 stock）")
+    p_skill_five.add_argument("--symbols", required=True, help="逗号分隔，如 sh513050,sh600188")
+    p_skill_five.add_argument("--run-dir", default="", help="可选：复用 run 目录（含 deep-holdings 分析产物）")
+    p_skill_five.add_argument("--source", default="auto", choices=["auto", "akshare", "tushare"], help="行情数据源（缺产物时会抓取；默认 auto）")
+    p_skill_five.add_argument("--freq", default="weekly", choices=["daily", "weekly"], help="分析频率（默认 weekly）")
+    p_skill_five.add_argument("--out", default=str(Path("outputs") / "agents" / "five_schools.md"), help="输出 markdown 路径")
+    p_skill_five.add_argument("--out-json", default=str(Path("outputs") / "agents" / "five_schools.json"), help="输出 json 路径")
+    p_skill_five.set_defaults(func=cmd_skill)
+
+    p_skill_hot = skill_sub.add_parser("hotlines", help="主线热度/拥挤度识别（行情驱动；TuShare优先+AkShare兜底）")
+    p_skill_hot.add_argument("--universe", default=str(Path("config") / "hotlines_universe.yaml"), help="ETF 宇宙配置（默认 config/hotlines_universe.yaml）")
+    p_skill_hot.add_argument("--source", default="auto", choices=["auto", "akshare", "tushare"], help="行情数据源（默认 auto）")
+    p_skill_hot.add_argument("--cache-ttl-hours", type=float, default=24.0, help="缓存 TTL 小时（默认 24；0=每次强制拉取）")
+    p_skill_hot.add_argument("--top", type=int, default=10, help="主线 TopN（默认 10）")
+    p_skill_hot.add_argument("--out", default=str(Path("outputs") / "agents" / "hotlines.md"), help="输出 markdown 路径")
+    p_skill_hot.add_argument("--out-json", default=str(Path("outputs") / "agents" / "hotlines.json"), help="输出 json 路径")
+    p_skill_hot.set_defaults(func=cmd_skill)
+
     # memory：对话/偏好/复盘的持久化（data/ 里，默认 gitignore）
     p_mem = sub.add_parser("memory", help="记忆库：偏好/复盘/对话持久化（data/memory/）")
     mem_sub = p_mem.add_subparsers(dest="memory_cmd", required=True)

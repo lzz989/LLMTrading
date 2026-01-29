@@ -1,0 +1,48 @@
+schema: llm_trading.hotlines_universe.v1
+updated_at: "2026-01-29"
+note: >
+  这是“主线热度/拥挤度”用的 ETF 宇宙（可手工扩充）。
+  名称不确定就写“名称待解析”，运行时会尽力用本地 universe 缓存/数据源补全；补不出来就原样输出（不瞎编）。
+
+items:
+  # 宽基（环境温度计）
+  - symbol: sh510300
+    name: 沪深300ETF
+    tags: [股票ETF, 宽基, A股]
+    tradable: true
+  - symbol: sh510050
+    name: 上证50ETF
+    tags: [股票ETF, 宽基, A股]
+    tradable: true
+  - symbol: sh510500
+    name: 中证500ETF
+    tags: [股票ETF, 宽基, A股]
+    tradable: true
+
+  # 你常用/常聊的方向
+  - symbol: sh513050
+    name: 易方达中证海外中国互联ETF
+    tags: [跨境ETF, 股票ETF, 海外]
+    tradable: true
+  - symbol: sh512980
+    name: 中证传媒ETF
+    tags: [股票ETF, 行业, A股]
+    tradable: true
+
+  # 典型主线（名称若不确定，先占位；你后续可改）
+  - symbol: sh512000
+    name: 证券ETF
+    tags: [股票ETF, 行业, A股]
+    tradable: true
+  - symbol: sh518880
+    name: 黄金ETF
+    tags: [商品ETF, 黄金]
+    tradable: true
+  - symbol: sh515070
+    name: 名称待解析
+    tags: [股票ETF, 行业, A股]
+    tradable: true
+  - symbol: sh512400
+    name: 名称待解析
+    tags: [股票ETF, 行业, A股]
+    tradable: true

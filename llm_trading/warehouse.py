@@ -285,6 +285,54 @@ def ensure_warehouse_sentinels(paths: WarehousePaths) -> None:
         ),
     )
 
+    # 2.5) 主线热度（hotlines skill）
+    _write_text_if_missing(
+        paths.sentinel_outputs_dir / "hotlines.json",
+        (
+            "{\n"
+            '  "schema": "llm_trading.skill.hotlines.v1",\n'
+            '  "generated_at": "1970-01-01T00:00:00",\n'
+            '  "as_of": "1970-01-01",\n'
+            '  "top_n": 0,\n'
+            '  "universe": {"path": "sentinel", "count": 0},\n'
+            '  "tags_rank": [\n'
+            "    {\n"
+            '      "tag": "sentinel",\n'
+            '      "score": 0,\n'
+            '      "representatives": [{"symbol": "sh000000", "name": "sentinel", "tradable": true}],\n'
+            '      "risk_flags": ["sentinel"]\n'
+            "    }\n"
+            "  ],\n"
+            '  "etf_items": [\n'
+            "    {\n"
+            '      "symbol": "sh000000",\n'
+            '      "name": "sentinel",\n'
+            '      "tags": ["sentinel"],\n'
+            '      "topic_tags": ["sentinel"],\n'
+            '      "tradable": true,\n'
+            '      "ok": true,\n'
+            '      "metrics": {\n'
+            '        "ok": false,\n'
+            '        "as_of": "1970-01-01",\n'
+            '        "close": null,\n'
+            '        "ret_5d": null,\n'
+            '        "ret_10d": null,\n'
+            '        "ret_20d": null,\n'
+            '        "vol_ratio_20d": null,\n'
+            '        "amount_avg20": null,\n'
+            '        "close_vs_ma20_pct": null,\n'
+            '        "atr_pct_14": null,\n'
+            '        "dd_from_20d_high_pct": null\n'
+            "      },\n"
+            '      "score": 0,\n'
+            '      "risk_flags": ["sentinel"]\n'
+            "    }\n"
+            "  ],\n"
+            '  "note": "sentinel"\n'
+            "}\n"
+        ),
+    )
+
     _write_text_if_missing(
         paths.sentinel_outputs_dir / "strategy_signal.json",
         (
@@ -1111,6 +1159,7 @@ def _create_views(con, paths: WarehousePaths) -> None:
     pat_opp = (root / "outputs" / "*" / "opportunity_score.json").as_posix()
     pat_cash = (root / "outputs" / "*" / "cash_signal.json").as_posix()
     pat_ps = (root / "outputs" / "*" / "position_sizing.json").as_posix()
+    pat_hotlines = (root / "outputs" / "*" / "hotlines.json").as_posix()
     pat_strategy_sig = (root / "outputs" / "*" / "strategy_signal.json").as_posix()
     pat_fr_sum = (root / "outputs" / "*" / "factor_research_summary.json").as_posix()
     pat_fr_ic = (root / "outputs" / "*" / "factor_research_ic.csv").as_posix()
@@ -1629,6 +1678,58 @@ def _create_views(con, paths: WarehousePaths) -> None:
             reason,
             notes
           from read_json_auto({_sql_quote(pat_ps)}, filename=true, union_by_name=true)
+        )
+        where out_dir <> '_duckdb_sentinel'
+        """
+    )
+
+    # hotlines（主线热度；skill 输出）
+    con.execute(
+        f"""
+        create or replace view wh.v_hotlines_tags_rank as
+        select * from (
+          select
+            regexp_extract(t.filename, 'outputs/([^/]+)/', 1) as out_dir,
+            t.filename as _file,
+            try_cast(t.generated_at as timestamp) as generated_at,
+            try_cast(t.as_of as date) as as_of,
+            try_cast(u.it.tag as text) as tag,
+            try_cast(u.it.score as double) as score,
+            u.it.risk_flags as risk_flags,
+            u.it.representatives as representatives
+          from read_json_auto({_sql_quote(pat_hotlines)}, filename=true, union_by_name=true) t
+          cross join unnest(t.tags_rank) as u(it)
+        )
+        where out_dir <> '_duckdb_sentinel'
+        """
+    )
+    con.execute(
+        f"""
+        create or replace view wh.v_hotlines_etf_items as
+        select * from (
+          select
+            regexp_extract(t.filename, 'outputs/([^/]+)/', 1) as out_dir,
+            t.filename as _file,
+            try_cast(t.generated_at as timestamp) as generated_at,
+            try_cast(t.as_of as date) as as_of,
+            u.it.symbol as symbol,
+            u.it.name as name,
+            u.it.tags as tags,
+            u.it.topic_tags as topic_tags,
+            try_cast(u.it.tradable as boolean) as tradable,
+            try_cast(u.it.ok as boolean) as ok,
+            try_cast(u.it.score as double) as score,
+            u.it.risk_flags as risk_flags,
+            try_cast(u.it.metrics.ret_5d as double) as ret_5d,
+            try_cast(u.it.metrics.ret_10d as double) as ret_10d,
+            try_cast(u.it.metrics.ret_20d as double) as ret_20d,
+            try_cast(u.it.metrics.vol_ratio_20d as double) as vol_ratio_20d,
+            try_cast(u.it.metrics.amount_avg20 as double) as amount_avg20,
+            try_cast(u.it.metrics.close_vs_ma20_pct as double) as close_vs_ma20_pct,
+            try_cast(u.it.metrics.atr_pct_14 as double) as atr_pct_14,
+            try_cast(u.it.metrics.dd_from_20d_high_pct as double) as dd_from_20d_high_pct
+          from read_json_auto({_sql_quote(pat_hotlines)}, filename=true, union_by_name=true) t
+          cross join unnest(t.etf_items) as u(it)
         )
         where out_dir <> '_duckdb_sentinel'
         """

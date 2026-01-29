@@ -16,3 +16,7 @@ fi
 
 "${PY}" -m compileall -q llm_trading
 "${PY}" -m unittest discover -s tests -p "test_*.py"
+
+# CLI parser smoke (no network)
+"${PY}" -m llm_trading skill five_schools --help >/dev/null
+"${PY}" -m llm_trading skill hotlines --help >/dev/null

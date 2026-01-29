@@ -50,6 +50,9 @@ class TestWarehouseViews(unittest.TestCase):
                     "wh.v_opportunity_score",
                     "wh.v_cash_signal",
                     "wh.v_position_sizing",
+                    # hotlines skill
+                    "wh.v_hotlines_tags_rank",
+                    "wh.v_hotlines_etf_items",
                     # Phase3/4
                     "wh.v_strategy_signal",
                     "wh.v_strategy_alignment",
@@ -67,4 +70,3 @@ class TestWarehouseViews(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
