@@ -619,6 +619,24 @@ BBB 稳健性评估（**walk-forward + 参数敏感性**；研究用途）：
 - `scan_etf/`：legacy 扫描原始产物（top_bbb/top_trend/top_swing 等；用于对照/兜底）
 - `strategy_alignment/`：新旧信号对齐报告（TopK overlap + mismatches）
 
+### 行情口径自检（verify-prices）
+
+你要拿它做真金白银的决策，**第一优先级就是别报错收盘价/涨幅口径**。
+
+用 `verify-prices` 快速核对“最新日期/收盘价/涨幅/数据源”：
+
+```bash
+".venv/bin/python" -m llm_trading verify-prices --asset etf --symbol sh513050 --source auto --basis raw
+```
+
+如果你怀疑“复权口径导致涨幅对不上”，可以对比：
+
+```bash
+".venv/bin/python" -m llm_trading verify-prices --asset stock --symbol sh600188 --source auto --basis raw --compare qfq
+```
+
+输出里会打印 `data_source=tushare/akshare` 以及是否 `intraday_unclosed`（盘中价风险）。
+
 ## 多策略信号聚合（signals-merge）
 
 你也可以手动合并多份 `signals.json`（输出 `strategy=signals_merged`，研究用途）：
